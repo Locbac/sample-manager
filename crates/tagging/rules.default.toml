@@ -1,0 +1,104 @@
+# scoutkit ruleset v0.1 — USER-EDITABLE by design.
+# [[rules]] tag = canonical tag name; terms = exact lowercase tokens that
+# resolve to it; weight = base confidence for a direct filename hit.
+# Folder hits are scaled by [folder].weight and distance (1/depth).
+# Keep two-letter aliases conservative; noise tokens (pure digits, 1-char)
+# are filtered in code.
+version = "v0.1.0"
+
+[folder]
+enabled = true
+weight = 0.35
+max_depth = 2
+
+# --- drums ------------------------------------------------------------------
+[[rules]] 
+tag = "kick"        
+terms = ["kick", "bd", "kik", "bassdrum", "bassdrm", "kickdrum"]  
+weight = 1.0
+[[rules]] 
+tag = "snare"       
+terms = ["snare", "sd", "snr", "snares"]                            
+weight = 1.0
+[[rules]] 
+tag = "clap"        
+terms = ["clap", "clps", "claps", "clapshot"]                       
+weight = 1.0
+[[rules]] 
+tag = "tom"         
+terms = ["tom", "toms", "floortom", "racktom"]                      
+weight = 1.0
+[[rules]] 
+tag = "rim"         
+terms = ["rim", "rimshot", "stick", "sidestick"]                    
+weight = 1.0
+[[rules]] 
+tag = "hat_closed"  
+terms = ["ch", "hh", "hhc", "closedhat", "hats", "hat"]            
+weight = 0.9
+[[rules]] 
+tag = "hat_open"    
+terms = ["oh", "ohh", "openhat", "openhats", "pedalhat"]            
+weight = 1.0
+[[rules]] 
+tag = "crash"       
+terms = ["crash", "crsh"]                                           
+weight = 1.0
+[[rules]] 
+tag = "ride"        
+terms = ["ride", "rides", "ridecym"]                                
+weight = 1.0
+[[rules]] 
+tag = "cymbal"      
+terms = ["cym", "cymbal", "splash", "china"]                        
+weight = 0.9
+[[rules]] 
+tag = "shaker"      
+terms = ["shaker", "shk", "maraca", "cabasa"]                       
+weight = 1.0
+[[rules]] 
+tag = "percussion"  
+terms = ["perc", "bongo", "conga", "cowbell", "tamb", "tambourine", "woodblock", "agogo"]
+weight = 1.0
+
+# --- kit families -------------------------------------------------------------
+[[rules]] 
+tag = "bass"        
+terms = ["bass", "sub", "reese", "wobble"]                          
+weight = 0.9
+[[rules]] 
+tag = "synth"       
+terms = ["synth", "lead", "plk", "pluck", "keys"]                   
+weight = 0.9
+[[rules]] 
+tag = "pad"         
+terms = ["pad", "pads", "atmo", "atmosphere"]                       
+weight = 0.9
+[[rules]] 
+tag = "strings"     
+terms = ["strings", "str", "violin", "cello", "orchestra"]          
+weight = 0.9
+[[rules]] 
+tag = "vocal"       
+terms = ["vox", "vocal", "vocals", "chant", "adlib"]                
+weight = 0.9
+
+# --- loops & fx ---------------------------------------------------------------
+[[rules]] 
+tag = "loop"        
+terms = ["loop", "loops", "drumloop", "toploop", "fill"]            
+weight = 0.8
+[[rules]] 
+tag = "fx"          
+terms = ["fx", "sfx", "riser", "uplifter", "downlifter", "impact", "sweep", "whoosh", "drop"]
+weight = 0.9
+[[rules]] 
+tag = "texture"     
+terms = ["texture", "noise", "vinyl", "crackle", "field"]           
+weight = 0.8
+
+# NOTE things deliberately absent:
+#   "808" (pure digit => filtered as noise; too ambiguous)
+#   "hat" for "phat" (exact-token match prevents it; no substring matching)
+#   genre names with high collision risk — add them in YOUR user rules with
+#   lower weights and check false positives on your own corpus.

@@ -1,0 +1,60 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/db",
+    "crates/scanner",
+    "crates/tagging",
+    "crates/search",
+    "crates/audio",
+    "crates/embedded",
+    "crates/import-adsr",
+    "crates/cli",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# --- fundamentals -----------------------------------------------------------
+anyhow            = "1"
+thiserror         = "2"
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+toml              = "0.8"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- persistence -------------------------------------------------------------
+rusqlite          = { version = "0.32", features = ["bundled"] } # bundled => no system sqlite needed
+
+# --- filesystem / concurrency ------------------------------------------------
+walkdir           = "2"
+crossbeam         = "0.8"
+parking_lot       = "0.12"
+
+# --- content identity --------------------------------------------------------
+xxhash-rust       = { version = "0.8", features = ["xxh3"] } # fast identity; sha2 optional for paranoia
+sha2              = "0.10"
+
+# --- audio -------------------------------------------------------------------
+# Feature-list only what you ship. "alac" and "isomp4" cover m4a; drop what
+# you do not want to support.
+symphonia         = { version = "0.5", default-features = false,
+                      features = ["wav", "mp3", "aac", "flac", "vorbis", "isomp4", "mkv", "alac"] }
+cpal              = "0.15"
+
+# --- embedded metadata -------------------------------------------------------
+lofty             = "0.22"
+
+# --- CLI ---------------------------------------------------------------------
+clap              = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Spikes live OUTSIDE the workspace so they can fail/pin independently:
+#   spikes/drag-out      (tauri 2 + tauri-plugin-drag — THE gate)
+#   spikes/audio-preview (symphonia + cpal)
+#   spikes/sqlite-bench  (rusqlite, 1M synthetic paths)

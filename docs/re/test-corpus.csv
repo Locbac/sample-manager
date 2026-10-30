@@ -1,0 +1,33 @@
+file_id,filename,folder_context,ground_truth,experiment,expected_signal,notes
+C001,kick_01.wav,Kicks,kick,E1,tag follows name,audio is a clean 909-style kick
+C002,snare_top.wav,Kicks,kick,E1,tag follows name,same bytes as C001 renamed
+C003,zzz.wav,Misc,kick,E1,no tag or audio-derived kick,same bytes as C001 neutral name
+C004,a1.wav,Misc,kick,E2,audio-derived kick if analysis exists,three audios share this name series
+C005,a1.wav,Misc,snare,E2,audio-derived snare if analysis exists,second audio same neutral name
+C006,a1.wav,Misc,hat_closed,E2,audio-derived hat if analysis exists,third audio same neutral name
+C007,tone.wav,Kicks,sine_tone,E3,folder-derived kick weak,440Hz sine has no drum identity
+C008,tone.wav,Synths,sine_tone,E3,folder-derived synth weak,same bytes different folder
+C009,tone.wav,Misc,sine_tone,E3,no tag expected,neutral folder control
+C010,kick_01.wav,Snares,snare,E4,misleading name: record which source wins,audio is actually a gated snare
+C011,BD-Deep.wav,Kicks,kick,E1,alias bd resolves to kick,hyphen separator and alias coverage
+C012,OpenHat A.wav,Hats,hat_open,E1,camelCase tokenization to open hat,camel-case alias handling
+C013,HH_909_closed.flac,Hats,hat_closed,E1,hh alias plus closed variant,flac container coverage
+C014,SD_rim.aif,Rims,rim,E1,sd alias plus rim naming,aif container coverage
+C015,claps_layer.wav,Claps,clap,E1,plural term match,layered clap one-shot
+C016,tom_1.wav,Toms,tom_sounds_kicklike,E7,ambiguity preserved: filename tom audio kick,spec example short punchy low tom
+C017,bass_sub_c1.wav,Bass,bass_hit,E1,bass category,C1 sine sub hit
+C018,loop_124bpm_amin.wav,Loops,drum_loop,E1,loop class plus 124 bpm lexical hint,embedded metadata present for E5
+C019,loop_124bpm_amin_nometa.wav,Loops,drum_loop,E5,metadata-stripped twin of C018,made with map_metadata -1
+C020,fx_riser_8bar.wav,FX,fx_riser,E1,fx category,8-bar noise riser
+C021,perc_shaker.wav,Percussion,shaker,E1,percussion branch coverage,
+C022,crash_big_verb.wav,Cymbals,crash,E1,cymbal branch coverage,
+C023,synth_pad_warm.wav,Synths,synth_pad,E1,synth branch coverage,long pad 10s
+C024,vinyl_crackle.wav,Texture,noise_texture,E1,not a drum: no drum tag expected,
+C025,foley_door_slam.wav,Foley,impulse,E1,impulse-like may trigger kick: log false positive,known ambiguous case
+C026,kick_01_dup.wav,Dupes,kick,E7,duplicate bytes of C001 at new path,content-dedup probe
+C027,kick_01.wav,KicksRenamed,kick,E6,rename trial: same file fresh scan,sticky vs recomputed behavior
+C028,tap.wav,Misc,guitar_tap,E2,ambiguous percussive tap,low-confidence target
+C029,G2_BASS_120bpm.wav,Bass,bass_loop,E1,mixed token order plus key hint G2,
+C030,CH_01.wav,Hats,hat_closed,E1,ch alias closed hat,two-letter alias safety check
+C031,marching_snare_wav.wav,Snares,snare,E1,weird trailing suffix token,suffix noise robustness
+C032,noise.wav,Ambient,white_noise,E3,folder-derived ambient weak only,control: broadband noise audio
