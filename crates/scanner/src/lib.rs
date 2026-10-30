@@ -118,36 +118,40 @@ fn run(
                 &txb, root_id, &rel, &name, &tokens, &ext, size, mtime, run_id,
             )?;
 
-            // Extract musical properties: BPM, musical key, and loop status
-            let musical = scout_tagging::extract_musical_info(&name, &rel);
-            let key_id = if let Some(key_str) = &musical.key {
-                scout_db::find_musical_key(&txb, key_str).ok().flatten().map(|(kid, _, _)| kid)
-            } else {
-                None
-            };
-            let _ = scout_db::update_file_musical_info(&txb, id, musical.bpm, key_id, musical.is_loop);
+            // Only extract musical properties and auto-assign tags if the file is new or modified!
+            // Unchanged files already have their tags and musical properties indexed.
+            if was_changed {
+                // Extract musical properties: BPM, musical key, and loop status
+                let musical = scout_tagging::extract_musical_info(&name, &rel);
+                let key_id = if let Some(key_str) = &musical.key {
+                    scout_db::find_musical_key(&txb, key_str).ok().flatten().map(|(kid, _, _)| kid)
+                } else {
+                    None
+                };
+                let _ = scout_db::update_file_musical_info(&txb, id, musical.bpm, key_id, musical.is_loop);
 
-            // Auto-assign tags based on file name & parent folder hierarchy (deduplicated by tag)
-            let mut best_by_tag: std::collections::HashMap<String, scout_tagging::Suggestion> = std::collections::HashMap::new();
-            for s in engine.suggest(&name, &rel) {
-                best_by_tag
-                    .entry(s.tag.clone())
-                    .and_modify(|existing| {
-                        if s.score > existing.score {
-                            *existing = s.clone();
-                        }
-                    })
-                    .or_insert(s);
-            }
-            for s in best_by_tag.into_values() {
-                if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, &s.kind, "system") {
-                    let source = match s.source {
-                        scout_tagging::Source::FilenameRule => "filename_rule",
-                        scout_tagging::Source::FolderRule => "folder_rule",
-                    };
-                    let _ = scout_db::record_automatic_tag(
-                        &txb, id, tag_id, source, Some(s.score), Some(&s.detail),
-                    );
+                // Auto-assign tags based on file name & parent folder hierarchy (deduplicated by tag)
+                let mut best_by_tag: std::collections::HashMap<String, scout_tagging::Suggestion> = std::collections::HashMap::new();
+                for s in engine.suggest(&name, &rel) {
+                    best_by_tag
+                        .entry(s.tag.clone())
+                        .and_modify(|existing| {
+                            if s.score > existing.score {
+                                *existing = s.clone();
+                            }
+                        })
+                        .or_insert(s);
+                }
+                for s in best_by_tag.into_values() {
+                    if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, &s.kind, "system") {
+                        let source = match s.source {
+                            scout_tagging::Source::FilenameRule => "filename_rule",
+                            scout_tagging::Source::FolderRule => "folder_rule",
+                        };
+                        let _ = scout_db::record_automatic_tag(
+                            &txb, id, tag_id, source, Some(s.score), Some(&s.detail),
+                        );
+                    }
                 }
             }
 

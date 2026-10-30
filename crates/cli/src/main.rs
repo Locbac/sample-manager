@@ -200,3 +200,162 @@ fn ctrlc_note(flag: &std::sync::atomic::AtomicBool) {
     eprintln!("(Ctrl-C cancels gracefully via ScanHandle.cancel)");
     let _ = flag;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parsing_add_root() {
+        let args = vec!["scout", "add-root", "/path/to/samples"];
+        let cli = Cli::try_parse_from(args).expect("parse add-root");
+        match cli.cmd {
+            Cmd::AddRoot { path } => {
+                assert_eq!(path, PathBuf::from("/path/to/samples"));
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_scan() {
+        let args = vec!["scout", "scan", "42", "--focus", "drums/kicks"];
+        let cli = Cli::try_parse_from(args).expect("parse scan");
+        match cli.cmd {
+            Cmd::Scan { root_id, focus } => {
+                assert_eq!(root_id, 42);
+                assert_eq!(focus, Some("drums/kicks".to_string()));
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_search() {
+        let args = vec![
+            "scout", "search", "kick",
+            "--exts", "wav",
+            "--exts", "mp3",
+            "--bpm-min", "120.0",
+            "--bpm-max", "140.0",
+            "--tag", "1",
+            "--tag", "5",
+            "--fav",
+            "--limit", "25",
+            "--offset", "10",
+        ];
+        let cli = Cli::try_parse_from(args).expect("parse search");
+        match cli.cmd {
+            Cmd::Search { q, exts, bpm_min, bpm_max, tag, fav, limit, offset } => {
+                assert_eq!(q, Some("kick".to_string()));
+                assert_eq!(exts, vec!["wav".to_string(), "mp3".to_string()]);
+                assert_eq!(bpm_min, Some(120.0));
+                assert_eq!(bpm_max, Some(140.0));
+                assert_eq!(tag, vec![1, 5]);
+                assert!(fav);
+                assert_eq!(limit, 25);
+                assert_eq!(offset, 10);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parsing_tag_ops() {
+        let cli = Cli::try_parse_from(vec!["scout", "show", "7"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Show { file_id: 7 }));
+
+        let cli = Cli::try_parse_from(vec!["scout", "tag", "7", "808"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Tag { file_id: 7, name } if name == "808"));
+
+        let cli = Cli::try_parse_from(vec!["scout", "dismiss", "7", "3"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Dismiss { file_id: 7, tag_id: 3 }));
+
+        let cli = Cli::try_parse_from(vec!["scout", "confirm", "7", "3"]).unwrap();
+        assert!(matches!(cli.cmd, Cmd::Confirm { file_id: 7, tag_id: 3 }));
+    }
+
+    #[test]
+    fn test_cli_parsing_retag_and_import() {
+        let cli = Cli::try_parse_from(vec![
+            "scout", "retag", "1",
+            "--rules", "custom_rules.toml",
+        ]).unwrap();
+        match cli.cmd {
+            Cmd::Retag { root_id, rules } => {
+                assert_eq!(root_id, 1);
+                assert_eq!(rules, PathBuf::from("custom_rules.toml"));
+            }
+            _ => panic!("wrong command variant"),
+        }
+
+        let cli = Cli::try_parse_from(vec![
+            "scout", "import-adsr", "adsr.db",
+            "--path-map", "X:/=Y:/",
+        ]).unwrap();
+        match cli.cmd {
+            Cmd::ImportAdsr { src, path_map, dry_run } => {
+                assert_eq!(src, PathBuf::from("adsr.db"));
+                assert_eq!(path_map, vec!["X:/=Y:/".to_string()]);
+                assert!(dry_run);
+            }
+            _ => panic!("wrong command variant"),
+        }
+    }
+
+    #[test]
+    fn test_tag_lifecycle_and_non_resurrection() {
+        let db_file = std::env::temp_dir().join(format!("scout_test_cli_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let db = scout_db::open(&db_file).expect("open db");
+
+        // Insert a dummy root and file
+        db.conn.execute("INSERT INTO roots(id, path, enabled) VALUES (1, '/samples', 1)", []).unwrap();
+        db.conn.execute(
+            "INSERT INTO files(id, root_id, rel_path, name, ext, size, mtime)
+             VALUES (10, 1, 'drums/snare_heavy.wav', 'snare_heavy.wav', 'wav', 1024, 100)",
+            [],
+        ).unwrap();
+
+        // 1. Automatic tag suggestion
+        let tag_id = scout_db::ensure_tag(&db.conn, "snare", "category", "system").unwrap();
+        scout_db::record_automatic_tag(&db.conn, 10, tag_id, "filename_rule", Some(0.9), Some("snare")).unwrap();
+
+        // Verify it exists in active state
+        let state: String = db.conn.query_row(
+            "SELECT state FROM file_tags WHERE file_id = 10 AND tag_id = ?1",
+            [tag_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(state, "active");
+
+        // 2. User confirms tag
+        scout_db::confirm_tag(&db.conn, 10, tag_id).unwrap();
+        let state: String = db.conn.query_row(
+            "SELECT state FROM file_tags WHERE file_id = 10 AND tag_id = ?1",
+            [tag_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(state, "confirmed");
+
+        // 3. User dismisses tag
+        scout_db::dismiss_tag(&db.conn, 10, tag_id).unwrap();
+        let state: String = db.conn.query_row(
+            "SELECT state FROM file_tags WHERE file_id = 10 AND tag_id = ?1",
+            [tag_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(state, "dismissed");
+
+        // 4. Retag / re-run automatic tagging must NEVER resurrect a dismissed tag
+        scout_db::record_automatic_tag(&db.conn, 10, tag_id, "filename_rule", Some(0.95), Some("snare")).unwrap();
+        let state_after: String = db.conn.query_row(
+            "SELECT state FROM file_tags WHERE file_id = 10 AND tag_id = ?1",
+            [tag_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(state_after, "dismissed", "Dismissed tags must never be resurrected by automated tagging");
+
+        let _ = std::fs::remove_file(&db_file);
+    }
+}

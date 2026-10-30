@@ -98,6 +98,10 @@ struct SampleManagerApp {
     pitch_semitones: i32,
     auto_audition: bool,
     loop_playback: bool,
+    audio_load_id: u64,
+    is_audio_loading: bool,
+    audio_decode_rx: Option<crossbeam::channel::Receiver<(u64, PathBuf, Result<Decoded, String>)>>,
+    audio_decode_tx: crossbeam::channel::Sender<(u64, PathBuf, Result<Decoded, String>)>,
 
     // Library scanning state
     is_scanning: bool,
@@ -108,6 +112,7 @@ struct SampleManagerApp {
     new_root_path: String,
     show_add_modal: bool,
     add_modal_error: Option<String>,
+    show_force_rescan_modal: Option<Option<i64>>, // None = closed, Some(None) = all, Some(Some(rid)) = single
 
     // ADSR Import state
     show_adsr_modal: bool,
@@ -140,6 +145,8 @@ impl SampleManagerApp {
         if untagged_count > 0 {
             let _ = scout_scanner::tag_all_files(&mut db.conn);
         }
+
+        let (audio_decode_tx, audio_decode_rx) = crossbeam::channel::unbounded();
 
         let mut app = Self {
             db_path: canonical_db,
@@ -177,6 +184,10 @@ impl SampleManagerApp {
             pitch_semitones: 0,
             auto_audition: true,
             loop_playback: true,
+            audio_load_id: 0,
+            is_audio_loading: false,
+            audio_decode_rx: Some(audio_decode_rx),
+            audio_decode_tx,
             is_scanning: false,
             scan_status: "Ready".to_string(),
             scan_progress: (0, 0, 0),
@@ -185,6 +196,7 @@ impl SampleManagerApp {
             new_root_path: String::new(),
             show_add_modal: false,
             add_modal_error: None,
+            show_force_rescan_modal: None,
             show_adsr_modal: false,
             adsr_db_path: String::new(),
             adsr_dry_run: true,
@@ -370,64 +382,46 @@ impl SampleManagerApp {
     }
 
     fn load_waveform(&mut self, path: &Path) {
-        let decoded = if path.exists() {
-            scout_audio::decode(path).ok()
-        } else {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
-            Some(Self::generate_synthetic_audition(name))
-        };
-
-        if let Some(decoded) = decoded {
-            self.compute_peaks(&decoded.samples, decoded.channels as usize);
-            self.selected_sample_info = Some((decoded.channels, decoded.sample_rate, decoded.duration_secs()));
-            self.current_decoded = Some(Arc::new(decoded));
-        }
+        self.audio_load_id += 1;
+        let load_id = self.audio_load_id;
+        self.is_audio_loading = true;
+        let path_buf = path.to_path_buf();
+        let tx = self.audio_decode_tx.clone();
+        std::thread::spawn(move || {
+            let res = if path_buf.exists() {
+                scout_audio::decode(&path_buf).map_err(|e| e.to_string())
+            } else {
+                let name = path_buf.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+                Ok(Self::generate_synthetic_audition(name))
+            };
+            let _ = tx.send((load_id, path_buf, res));
+        });
     }
 
     fn load_and_play(&mut self, path: &Path) {
-        let is_real = path.exists();
-        let decoded = if is_real {
-            match scout_audio::decode(path) {
-                Ok(d) => Some(d),
-                Err(e) => {
-                    eprintln!("Audio decode error: {e}");
-                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
-                    Some(Self::generate_synthetic_audition(name))
-                }
-            }
-        } else {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
-            self.status_toast = Some((
-                format!("File offline: {name} (Audition synthesized)"),
-                Instant::now(),
-            ));
-            Some(Self::generate_synthetic_audition(name))
-        };
+        self.audio_load_id += 1;
+        let load_id = self.audio_load_id;
+        self.is_audio_loading = true;
 
-        if let Some(decoded) = decoded {
-            self.compute_peaks(&decoded.samples, decoded.channels as usize);
-            self.selected_sample_info = Some((decoded.channels, decoded.sample_rate, decoded.duration_secs()));
-            let arc_data = Arc::new(decoded);
-            self.current_decoded = Some(arc_data.clone());
-
-            // Stop existing playback
-            if let Some(player) = &self.current_player {
-                player.pause();
-            }
-
-            // Start new stream
-            match Player::play(arc_data) {
-                Ok(player) => {
-                    player.set_volume(self.volume);
-                    player.set_pitch(self.pitch_semitones);
-                    player.set_loop(self.loop_playback);
-                    self.current_player = Some(player);
-                }
-                Err(e) => {
-                    eprintln!("Audio playback error: {e}");
-                }
-            }
+        // Stop existing playback immediately without blocking UI
+        if let Some(player) = &self.current_player {
+            player.pause();
         }
+        self.current_player = None;
+        self.waveform_peaks.clear();
+
+        let path_buf = path.to_path_buf();
+        let tx = self.audio_decode_tx.clone();
+
+        std::thread::spawn(move || {
+            let res = if path_buf.exists() {
+                scout_audio::decode(&path_buf).map_err(|e| e.to_string())
+            } else {
+                let name = path_buf.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+                Ok(Self::generate_synthetic_audition(name))
+            };
+            let _ = tx.send((load_id, path_buf, res));
+        });
     }
 
     fn compute_peaks(&mut self, samples: &[f32], channels: usize) {
@@ -706,6 +700,58 @@ impl SampleManagerApp {
         }
     }
 
+    fn poll_audio(&mut self) {
+        let messages: Vec<(u64, PathBuf, Result<Decoded, String>)> = if let Some(rx) = &self.audio_decode_rx {
+            let mut msgs = Vec::new();
+            while let Ok(msg) = rx.try_recv() {
+                msgs.push(msg);
+            }
+            msgs
+        } else {
+            Vec::new()
+        };
+
+        for (id, p, result) in messages {
+            if id == self.audio_load_id {
+                self.is_audio_loading = false;
+                match result {
+                    Ok(decoded) => {
+                        self.compute_peaks(&decoded.samples, decoded.channels as usize);
+                        self.selected_sample_info = Some((decoded.channels, decoded.sample_rate, decoded.duration_secs()));
+                        let arc_data = Arc::new(decoded);
+                        self.current_decoded = Some(arc_data.clone());
+                        match Player::play(arc_data) {
+                            Ok(player) => {
+                                player.set_volume(self.volume);
+                                player.set_pitch(self.pitch_semitones);
+                                player.set_loop(self.loop_playback);
+                                self.current_player = Some(player);
+                            }
+                            Err(e) => {
+                                eprintln!("Audio playback error: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Audio decode error: {e}");
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+                        let fallback = Self::generate_synthetic_audition(name);
+                        self.compute_peaks(&fallback.samples, fallback.channels as usize);
+                        self.selected_sample_info = Some((fallback.channels, fallback.sample_rate, fallback.duration_secs()));
+                        let arc_data = Arc::new(fallback);
+                        self.current_decoded = Some(arc_data.clone());
+                        if let Ok(player) = Player::play(arc_data) {
+                            player.set_volume(self.volume);
+                            player.set_pitch(self.pitch_semitones);
+                            player.set_loop(self.loop_playback);
+                            self.current_player = Some(player);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_input(&mut self, ctx: &egui::Context) {
         // Tab key cycles focus between SearchBox and SampleList
         if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
@@ -861,6 +907,10 @@ impl SampleManagerApp {
                         self.start_library_scan(rid);
                         ui.close();
                     }
+                }
+                if ui.button("Force Rescan All Libraries...").clicked() {
+                    self.show_force_rescan_modal = Some(None);
+                    ui.close();
                 }
                 if ui.button("Reveal Selected in File Manager").clicked() {
                     self.reveal_selected_file();
@@ -1109,6 +1159,14 @@ impl SampleManagerApp {
                 let color = Color32::from_rgb(luma, luma, luma);
                 painter.rect_filled(bar_rect, CornerRadius::ZERO, color);
             }
+        } else if self.is_audio_loading {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Loading & decoding audio preview...",
+                egui::FontId::proportional(13.0),
+                Color32::from_rgb(230, 230, 160),
+            );
         } else {
             painter.text(
                 rect.center(),
@@ -1376,9 +1434,7 @@ impl SampleManagerApp {
                 self.start_library_scan(rid);
             }
             Some(LibAction::ForceRescan(rid)) => {
-                let _ = self.db.conn.execute("UPDATE files SET last_seen_run = NULL WHERE root_id = ?1", [rid]);
-                let _ = scout_scanner::tag_all_files(&mut self.db.conn);
-                self.start_library_scan(rid);
+                self.show_force_rescan_modal = Some(Some(rid));
             }
             Some(LibAction::Reveal(p)) => {
                 let p = PathBuf::from(p);
@@ -2007,6 +2063,62 @@ impl SampleManagerApp {
                 });
         }
 
+        // Modal: Force Rescan Confirmation
+        if let Some(target) = self.show_force_rescan_modal {
+            egui::Window::new("Confirm Force Rescan")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new("Force rescan will re-walk all files on disk and re-probe audio headers.")
+                            .size(12.5)
+                            .color(Color32::WHITE),
+                    );
+                    ui.add_space(4.0);
+                    match target {
+                        Some(rid) => {
+                            let root_name = self.roots.iter().find(|(id, _, _)| *id == rid).map(|(_, p, _)| p.as_str()).unwrap_or("Selected Library");
+                            ui.label(format!("Target: {root_name}"));
+                        }
+                        None => {
+                            ui.label("Target: ALL registered sample libraries.");
+                        }
+                    }
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Existing favorites and manual user tags will be preserved.")
+                            .size(11.0)
+                            .color(Color32::from_rgb(180, 205, 230)),
+                    );
+                    ui.add_space(10.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.button(egui::RichText::new("Force Rescan").color(Color32::from_rgb(255, 120, 120)).strong()).clicked() {
+                            match target {
+                                Some(rid) => {
+                                    let _ = self.db.conn.execute("UPDATE files SET last_seen_run = NULL WHERE root_id = ?1", [rid]);
+                                    let _ = scout_scanner::tag_all_files(&mut self.db.conn);
+                                    self.start_library_scan(rid);
+                                }
+                                None => {
+                                    let _ = self.db.conn.execute("UPDATE files SET last_seen_run = NULL", []);
+                                    let _ = scout_scanner::tag_all_files(&mut self.db.conn);
+                                    let rids: Vec<i64> = self.roots.iter().map(|(id, _, _)| *id).collect();
+                                    for rid in rids {
+                                        self.start_library_scan(rid);
+                                    }
+                                }
+                            }
+                            self.show_force_rescan_modal = None;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.show_force_rescan_modal = None;
+                        }
+                    });
+                });
+        }
+
         // Modal: Vim Keybindings Help
         if self.show_vim_help {
             egui::Window::new("Vim Keybindings Cheat Sheet")
@@ -2080,6 +2192,7 @@ impl eframe::App for SampleManagerApp {
         let ctx = ui.ctx().clone();
         apply_high_contrast_theme(&ctx);
         self.poll_scanner();
+        self.poll_audio();
         self.handle_input(&ctx);
 
         // Reset outbound drag state once mouse pointer is released
@@ -2164,4 +2277,199 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(SampleManagerApp::new(db_path, handle)))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_compute_peaks_empty() {
+        let db_path = std::env::temp_dir().join(format!("test_gui_peaks_empty_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut app = SampleManagerApp::new(db_path.clone(), None);
+        app.compute_peaks(&[], 2);
+        assert_eq!(app.waveform_peaks.len(), 360);
+        assert!(app.waveform_peaks.iter().all(|&p| p == 0.0));
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_compute_peaks_normalizes_and_clamps() {
+        let db_path = std::env::temp_dir().join(format!("test_gui_peaks_val_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut app = SampleManagerApp::new(db_path.clone(), None);
+        // Create 720 frames stereo (1440 samples)
+        let mut samples = vec![0.0f32; 1440];
+        // Insert a peak of 0.8 at frame 10 (sample 20) and an over-1.0 peak at frame 100 (sample 200)
+        samples[20] = 0.8;
+        samples[200] = 1.5;
+        app.compute_peaks(&samples, 2);
+        assert_eq!(app.waveform_peaks.len(), 360);
+        assert!(app.waveform_peaks.iter().all(|&p| p >= 0.0 && p <= 1.0));
+        assert!(app.waveform_peaks.iter().any(|&p| p > 0.0));
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_synthetic_audition_drums_and_synths() {
+        for name in &["kick_punch.wav", "snare_crisp.wav", "hihat.wav", "synth_lead_140bpm.wav", "perc.wav"] {
+            let decoded = SampleManagerApp::generate_synthetic_audition(name);
+            assert_eq!(decoded.channels, 2);
+            assert_eq!(decoded.sample_rate, 44100);
+            assert!(!decoded.samples.is_empty());
+            for &s in &decoded.samples {
+                assert!(s.is_finite());
+                assert!(s >= -1.0 && s <= 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_natural_sorting_filenames() {
+        let mut names = vec![
+            "Perc 10.wav",
+            "Perc 1.wav",
+            "Perc 20.wav",
+            "Perc 2.wav",
+            "Perc 11.wav",
+        ];
+        names.sort_by(|a, b| scout_db::natural_cmp(a, b));
+        assert_eq!(
+            names,
+            vec![
+                "Perc 1.wav",
+                "Perc 2.wav",
+                "Perc 10.wav",
+                "Perc 11.wav",
+                "Perc 20.wav",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_loop_default_behavior() {
+        // Loop sample: loop flag should default to true
+        let loop_row = scout_search::FileRow {
+            id: 1,
+            rel_path: "drums/top_loop_128bpm.wav".to_string(),
+            name: "top_loop_128bpm.wav".to_string(),
+            ext: "wav".to_string(),
+            duration_ms: Some(2000),
+            bpm: Some(128.0),
+            key: None,
+            camelot: None,
+            is_loop: Some(true),
+            size: 1000,
+            favorite: false,
+            total: 1,
+            tags: vec!["loop".to_string(), "drums".to_string()],
+            tags_display: "loop, drums".to_string(),
+        };
+        let is_loop_detected = loop_row.is_loop.unwrap_or_else(|| {
+            loop_row.name.to_lowercase().contains("loop")
+                || loop_row.rel_path.to_lowercase().contains("loop")
+                || loop_row.tags.iter().any(|t| t == "loop")
+        });
+        assert!(is_loop_detected);
+
+        // One-shot sample: loop flag should default to false
+        let shot_row = scout_search::FileRow {
+            id: 2,
+            rel_path: "drums/kick_01.wav".to_string(),
+            name: "kick_01.wav".to_string(),
+            ext: "wav".to_string(),
+            duration_ms: Some(200),
+            bpm: None,
+            key: None,
+            camelot: None,
+            is_loop: Some(false),
+            size: 1000,
+            favorite: false,
+            total: 1,
+            tags: vec!["kick".to_string()],
+            tags_display: "kick".to_string(),
+        };
+        let is_shot_detected = shot_row.is_loop.unwrap_or_else(|| {
+            shot_row.name.to_lowercase().contains("loop")
+                || shot_row.rel_path.to_lowercase().contains("loop")
+                || shot_row.tags.iter().any(|t| t == "loop")
+        });
+        assert!(!is_shot_detected);
+    }
+
+    #[test]
+    fn test_volume_and_pitch_clamping() {
+        let mut pitch = 0;
+        // Scroll up
+        pitch = (pitch + 1).clamp(-12, 12);
+        assert_eq!(pitch, 1);
+        // Overflow clamp
+        pitch = (pitch + 20).clamp(-12, 12);
+        assert_eq!(pitch, 12);
+        // Underflow clamp
+        pitch = (pitch - 30).clamp(-12, 12);
+        assert_eq!(pitch, -12);
+
+        let mut volume = 1.0f32;
+        volume = (volume + 0.1).clamp(0.0, 2.0);
+        assert!((volume - 1.1).abs() < 1e-4);
+        volume = (volume + 5.0).clamp(0.0, 2.0);
+        assert_eq!(volume, 2.0);
+        volume = (volume - 10.0).clamp(0.0, 2.0);
+        assert_eq!(volume, 0.0);
+    }
+
+    #[test]
+    fn test_gui_app_database_query_lifecycle() {
+        let db_path = std::env::temp_dir().join(format!("test_gui_app_query_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut app = SampleManagerApp::new(db_path.clone(), None);
+
+        // Insert dummy sample records into the database
+        app.db.conn.execute("INSERT INTO roots(id, path, enabled) VALUES (1, '/samples', 1)", []).unwrap();
+        app.db.conn.execute(
+            "INSERT INTO files(id, root_id, rel_path, name, ext, size, mtime, bpm, is_loop)
+             VALUES (1, 1, 'drums/future_bass_kick.wav', 'future_bass_kick.wav', 'wav', 1024, 100, 150.0, 0)",
+            [],
+        ).unwrap();
+        app.db.conn.execute(
+            "INSERT INTO files(id, root_id, rel_path, name, ext, size, mtime, bpm, is_loop)
+             VALUES (2, 1, 'leads/future_bass_lead_150bpm.wav', 'future_bass_lead_150bpm.wav', 'wav', 2048, 100, 150.0, 1)",
+            [],
+        ).unwrap();
+
+        // Tag them
+        let tag_kick = scout_db::ensure_tag(&app.db.conn, "kick", "category", "system").unwrap();
+        let tag_fb = scout_db::ensure_tag(&app.db.conn, "future bass", "genre", "system").unwrap();
+        scout_db::record_automatic_tag(&app.db.conn, 1, tag_kick, "filename_rule", Some(0.9), None).unwrap();
+        scout_db::record_automatic_tag(&app.db.conn, 1, tag_fb, "folder_rule", Some(0.85), None).unwrap();
+        scout_db::record_automatic_tag(&app.db.conn, 2, tag_fb, "folder_rule", Some(0.85), None).unwrap();
+
+        app.load_metadata();
+        assert_eq!(app.roots.len(), 1);
+
+        // Run unconstrained query
+        app.run_query();
+        assert_eq!(app.file_rows.len(), 2);
+
+        // Filter by search text
+        app.search_text = "kick".to_string();
+        app.run_query();
+        assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.file_rows[0].name, "future_bass_kick.wav");
+
+        // Clear search text and filter by tag
+        app.search_text.clear();
+        app.selected_tags.insert(tag_kick);
+        app.run_query();
+        assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.file_rows[0].name, "future_bass_kick.wav");
+
+        // Filter by loop
+        app.selected_tags.clear();
+        app.filter_loop = Some(true);
+        app.run_query();
+        assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.file_rows[0].name, "future_bass_lead_150bpm.wav");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
 }
