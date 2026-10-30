@@ -1,7 +1,7 @@
 //! crates/audio — audio decode and streaming preview.
 use std::fs::File;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -26,6 +26,14 @@ impl Decoded {
             0.0
         } else {
             (self.samples.len() / self.channels as usize) as f32 / self.sample_rate as f32
+        }
+    }
+
+    pub fn total_frames(&self) -> usize {
+        if self.channels == 0 {
+            0
+        } else {
+            self.samples.len() / self.channels as usize
         }
     }
 }
@@ -107,8 +115,11 @@ pub fn decode(path: &Path) -> Result<Decoded> {
 }
 
 pub struct Player {
-    pub position: Arc<AtomicUsize>,
+    pub position: Arc<AtomicUsize>, // sample index (0..samples.len())
     pub playing: Arc<AtomicBool>,
+    pub looping: Arc<AtomicBool>,
+    pub volume_bits: Arc<AtomicU32>,
+    pub pitch_semitones: Arc<AtomicI32>,
     _stream: cpal::Stream,
 }
 
@@ -119,18 +130,30 @@ impl Player {
             .default_output_device()
             .ok_or_else(|| anyhow!("no output device available"))?;
 
+        let channels = decoded.channels;
         let config = cpal::StreamConfig {
-            channels: decoded.channels,
+            channels,
             sample_rate: cpal::SampleRate(decoded.sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
 
         let position = Arc::new(AtomicUsize::new(0));
         let playing = Arc::new(AtomicBool::new(true));
+        let looping = Arc::new(AtomicBool::new(false));
+        let volume_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let pitch_semitones = Arc::new(AtomicI32::new(0));
 
         let pos_clone = position.clone();
         let playing_clone = playing.clone();
+        let loop_clone = looping.clone();
+        let vol_clone = volume_bits.clone();
+        let pitch_clone = pitch_semitones.clone();
         let data = decoded.clone();
+
+        let num_ch = channels as usize;
+        let total_frames = data.total_frames();
+
+        let mut current_frame_frac: f64 = 0.0;
 
         let stream = device.build_output_stream(
             &config,
@@ -139,19 +162,60 @@ impl Player {
                     output.fill(0.0);
                     return;
                 }
-                let mut current = pos_clone.load(Ordering::Relaxed);
-                for sample in output.iter_mut() {
-                    if current < data.samples.len() {
-                        *sample = data.samples[current];
-                        current += 1;
-                    } else {
-                        *sample = 0.0;
+
+                let is_loop = loop_clone.load(Ordering::Relaxed);
+                let vol = f32::from_bits(vol_clone.load(Ordering::Relaxed));
+                let pitch = pitch_clone.load(Ordering::Relaxed);
+                let speed = 2.0_f64.powf(pitch as f64 / 12.0);
+
+                // Sync current_frame_frac with atomic position if user sought
+                let target_sample_pos = pos_clone.load(Ordering::Relaxed);
+                let target_frame = (target_sample_pos / num_ch.max(1)) as f64;
+                if (target_frame - current_frame_frac).abs() > 50.0 {
+                    current_frame_frac = target_frame;
+                }
+
+                if total_frames == 0 {
+                    output.fill(0.0);
+                    return;
+                }
+
+                let mut out_idx = 0;
+                while out_idx < output.len() {
+                    let frame_floor = current_frame_frac.floor() as usize;
+                    if frame_floor >= total_frames {
+                        if is_loop {
+                            current_frame_frac = 0.0;
+                            continue;
+                        } else {
+                            // Audio finished
+                            playing_clone.store(false, Ordering::Relaxed);
+                            while out_idx < output.len() {
+                                output[out_idx] = 0.0;
+                                out_idx += 1;
+                            }
+                            break;
+                        }
                     }
+
+                    let frame_ceil = (frame_floor + 1).min(total_frames - 1);
+                    let frac = (current_frame_frac - frame_floor as f64) as f32;
+
+                    for ch in 0..num_ch {
+                        if out_idx >= output.len() {
+                            break;
+                        }
+                        let s1 = data.samples[frame_floor * num_ch + ch];
+                        let s2 = data.samples[frame_ceil * num_ch + ch];
+                        let val = s1 + frac * (s2 - s1);
+                        output[out_idx] = (val * vol).clamp(-1.0, 1.0);
+                        out_idx += 1;
+                    }
+
+                    current_frame_frac += speed;
                 }
-                pos_clone.store(current, Ordering::Relaxed);
-                if current >= data.samples.len() {
-                    playing_clone.store(false, Ordering::Relaxed);
-                }
+
+                pos_clone.store((current_frame_frac as usize * num_ch).min(data.samples.len()), Ordering::Relaxed);
             },
             |err| eprintln!("audio stream error: {err}"),
             None,
@@ -162,6 +226,9 @@ impl Player {
         Ok(Self {
             position,
             playing,
+            looping,
+            volume_bits,
+            pitch_semitones,
             _stream: stream,
         })
     }
@@ -172,6 +239,24 @@ impl Player {
 
     pub fn resume(&self) {
         self.playing.store(true, Ordering::Relaxed);
+    }
+
+    pub fn set_loop(&self, looping: bool) {
+        self.looping.store(looping, Ordering::Relaxed);
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.volume_bits.store(volume.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_pitch(&self, semitones: i32) {
+        self.pitch_semitones.store(semitones, Ordering::Relaxed);
+    }
+
+    pub fn seek_fraction(&self, frac: f32, decoded: &Decoded) {
+        let frac = frac.clamp(0.0, 1.0);
+        let sample_idx = (frac * decoded.samples.len() as f32) as usize;
+        self.position.store(sample_idx.min(decoded.samples.len()), Ordering::Relaxed);
     }
 
     pub fn seek_seconds(&self, secs: f32, decoded: &Decoded) {

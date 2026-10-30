@@ -1,0 +1,26 @@
+[package]
+name = "scout-gui"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "scout-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe.workspace = true
+egui_extras.workspace = true
+anyhow.workspace = true
+crossbeam.workspace = true
+rusqlite.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+scout-db = { path = "../db" }
+scout-search = { path = "../search" }
+scout-scanner = { path = "../scanner" }
+scout-tagging = { path = "../tagging" }
+scout-audio = { path = "../audio" }
+scout-embedded = { path = "../embedded" }
+scout-import-adsr = { path = "../import-adsr" }
