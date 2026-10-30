@@ -195,6 +195,7 @@ impl SampleManagerApp {
             show_drop_modal: false,
         };
 
+        let _ = scout_scanner::tag_all_files(&mut app.db.conn);
         app.load_metadata();
         app.run_query();
         app
@@ -1511,8 +1512,23 @@ impl SampleManagerApp {
                     self.reveal_selected_file();
                 }
                 if let Some((channels, sr, _)) = self.selected_sample_info {
+                    let mut parts = vec![format!("{}ch", channels), format!("{}Hz", sr)];
+                    if let Some(idx) = self.selected_row_index {
+                        if let Some(row) = self.file_rows.get(idx) {
+                            let bpm_val = row.bpm.or_else(|| scout_tagging::extract_bpm(&row.name, &row.rel_path));
+                            if let Some(b) = bpm_val {
+                                parts.push(format!("{:.0} BPM", b));
+                            }
+                            let key_val = row.key.clone().or_else(|| {
+                                scout_tagging::extract_key(&row.name, &row.rel_path).map(|(k, _)| k)
+                            });
+                            if let Some(k) = key_val {
+                                parts.push(format!("Key: {}", k));
+                            }
+                        }
+                    }
                     ui.label(
-                        egui::RichText::new(format!("{}ch | {}Hz", channels, sr))
+                        egui::RichText::new(parts.join(" | "))
                             .size(11.0)
                             .color(Color32::from_rgb(190, 190, 190)),
                     );
@@ -1718,13 +1734,17 @@ impl SampleManagerApp {
 
                     // Musical Key column
                     row.col(|ui| {
-                        let key_str = item.key.as_deref().unwrap_or("--");
+                        let key_val = item.key.clone().or_else(|| {
+                            scout_tagging::extract_key(&item.name, &item.rel_path).map(|(k, _)| k)
+                        });
+                        let key_str = key_val.unwrap_or_else(|| "--".to_string());
                         ui.label(egui::RichText::new(key_str).strong().color(Color32::WHITE));
                     });
 
                     // BPM column
                     row.col(|ui| {
-                        let bpm_str = item.bpm.map(|b| format!("{:.0}", b)).unwrap_or_else(|| "--".to_string());
+                        let bpm_val = item.bpm.or_else(|| scout_tagging::extract_bpm(&item.name, &item.rel_path));
+                        let bpm_str = bpm_val.map(|b| format!("{:.0}", b)).unwrap_or_else(|| "--".to_string());
                         ui.label(egui::RichText::new(bpm_str).strong().color(Color32::WHITE));
                     });
 

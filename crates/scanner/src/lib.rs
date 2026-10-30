@@ -140,7 +140,7 @@ fn run(
                     .or_insert(s);
             }
             for s in best_by_tag.into_values() {
-                if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, "category", "system") {
+                if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, &s.kind, "system") {
                     let source = match s.source {
                         scout_tagging::Source::FilenameRule => "filename_rule",
                         scout_tagging::Source::FolderRule => "folder_rule",
@@ -320,7 +320,7 @@ pub fn tag_all_files(c: &mut rusqlite::Connection) -> Result<usize> {
                 .or_insert(s);
         }
         for s in best_by_tag.into_values() {
-            if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, "category", "system") {
+            if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, &s.kind, "system") {
                 let source = match s.source {
                     scout_tagging::Source::FilenameRule => "filename_rule",
                     scout_tagging::Source::FolderRule => "folder_rule",

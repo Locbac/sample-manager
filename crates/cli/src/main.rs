@@ -169,7 +169,7 @@ fn main() -> anyhow::Result<()> {
                 let _ = scout_db::update_file_musical_info(&tx, *fid, musical.bpm, key_id, musical.is_loop);
 
                 for s in engine.suggest(name, rel) {
-                    let tag_id = scout_db::ensure_tag(&tx, &s.tag, "category", "system")?;
+                    let tag_id = scout_db::ensure_tag(&tx, &s.tag, &s.kind, "system")?;
                     let source = match s.source {
                         scout_tagging::Source::FilenameRule => "filename_rule",
                         scout_tagging::Source::FolderRule => "folder_rule",

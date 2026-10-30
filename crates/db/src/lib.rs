@@ -87,6 +87,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("../migrations/0001_init.sql")),
     ("0002_dedup_file_tags", include_str!("../migrations/0002_dedup_file_tags.sql")),
     ("0003_musical_keys_enharmonics", include_str!("../migrations/0003_musical_keys_enharmonics.sql")),
+    ("0004_tag_kinds", include_str!("../migrations/0004_tag_kinds.sql")),
 ];
 
 pub fn open(path: &Path) -> Result<Db> {
@@ -97,6 +98,7 @@ pub fn open(path: &Path) -> Result<Db> {
 }
 
 fn migrate(c: &mut Connection) -> Result<()> {
+    c.pragma_update(None, "foreign_keys", "OFF")?;
     c.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations(
            version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);",
@@ -117,6 +119,7 @@ fn migrate(c: &mut Connection) -> Result<()> {
         tx.execute("INSERT INTO schema_migrations(version) VALUES (?1)", params![version])?;
         tx.commit()?;
     }
+    c.pragma_update(None, "foreign_keys", "ON")?;
     Ok(())
 }
 
@@ -139,6 +142,12 @@ pub fn tag_id_by_name(c: &Connection, name: &str) -> Result<Option<i64>> {
 
 pub fn ensure_tag(c: &Connection, name: &str, kind: &str, origin: &str) -> Result<i64> {
     if let Some(id) = tag_id_by_name(c, name)? {
+        if kind != "category" {
+            let _ = c.execute(
+                "UPDATE tags SET kind = ?1 WHERE id = ?2 AND kind = 'category'",
+                params![kind, id],
+            );
+        }
         return Ok(id);
     }
     c.execute(

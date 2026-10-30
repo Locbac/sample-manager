@@ -1,151 +1,596 @@
-# scoutkit ruleset v0.1 — USER-EDITABLE by design.
-# [[rules]] tag = canonical tag name; terms = exact lowercase tokens that
-# resolve to it; weight = base confidence for a direct filename hit.
-# Folder hits are scaled by [folder].weight and distance (1/depth).
-version = "v0.1.0"
+# scoutkit ruleset v0.2 — Comprehensive ADSR taxonomy with genre, instrument, and category hierarchies.
+# [[rules]]
+# tag: canonical tag name
+# kind: 'genre' | 'category' | 'instrument' | 'character' | 'descriptor' | 'mood'
+# parent: optional parent tag name (inherits category context, e.g. snare -> drums)
+# excludes: negative terms to prevent false positives (e.g. dubstep excludes dub)
+# terms: exact lowercase tokens or multi-word phrases that resolve to it
+# weight: confidence score for direct match (scaled by depth for folder hits)
+version = "v0.2.0"
 
 [folder]
 enabled = true
-weight = 0.5
-max_depth = 3
-
-# --- 808 & sub bass ---------------------------------------------------------
-[[rules]]
-tag = "808"
-terms = ["808", "808s", "sub808", "bass808", "jerk808", "808z"]
-weight = 1.0
-
-# --- drums ------------------------------------------------------------------
-[[rules]] 
-tag = "kick"        
-terms = ["kick", "bd", "kik", "bassdrum", "bassdrm", "kickdrum", "kicks", "kikz"]  
-weight = 1.0
-
-[[rules]] 
-tag = "snare"       
-terms = ["snare", "sd", "snr", "snares", "snarz"]                            
-weight = 1.0
-
-[[rules]] 
-tag = "clap"        
-terms = ["clap", "clps", "claps", "clapshot", "snap", "snaps"]                       
-weight = 1.0
-
-[[rules]] 
-tag = "tom"         
-terms = ["tom", "toms", "floortom", "racktom", "hitom", "lotom", "midtom"]                      
-weight = 1.0
-
-[[rules]] 
-tag = "rim"         
-terms = ["rim", "rimshot", "stick", "sidestick", "cross"]                    
-weight = 1.0
-
-[[rules]] 
-tag = "hihat"  
-terms = ["ch", "hh", "hhc", "closedhat", "hats", "hat", "hihat", "hihats", "closedhh"]            
-weight = 0.95
-
-[[rules]] 
-tag = "openhat"    
-terms = ["oh", "ohh", "openhat", "openhats", "pedalhat", "openhh"]            
-weight = 1.0
-
-[[rules]] 
-tag = "crash"       
-terms = ["crash", "crsh", "crashes"]                                           
-weight = 1.0
-
-[[rules]] 
-tag = "ride"        
-terms = ["ride", "rides", "ridecym", "ridecymbal"]                                
-weight = 1.0
-
-[[rules]] 
-tag = "cymbal"      
-terms = ["cym", "cymbal", "cymbals", "splash", "china"]                        
-weight = 0.9
-
-[[rules]] 
-tag = "shaker"      
-terms = ["shaker", "shk", "maraca", "cabasa", "shakers"]                       
-weight = 1.0
-
-[[rules]] 
-tag = "percussion"  
-terms = ["perc", "percs", "bongo", "bongos", "conga", "congas", "cowbell", "tamb", "tambourine", "woodblock", "agogo", "guiro", "clave", "claves"]
-weight = 1.0
-
-# --- kit families & instruments ---------------------------------------------
-[[rules]] 
-tag = "bass"        
-terms = ["bass", "sub", "reese", "wobble", "synthbass", "subbass", "pluckedbass"]                          
-weight = 0.9
-
-[[rules]] 
-tag = "synth"       
-terms = ["synth", "lead", "plk", "pluck", "keys", "piano", "organ", "rhodes", "keyboard", "arp", "arpeggio"]                   
-weight = 0.9
-
-[[rules]] 
-tag = "pad"         
-terms = ["pad", "pads", "atmo", "atmosphere", "drone", "ambientpad"]                       
-weight = 0.9
-
-[[rules]] 
-tag = "strings"     
-terms = ["strings", "str", "violin", "cello", "orchestra", "string"]          
-weight = 0.9
-
-[[rules]] 
-tag = "vocal"       
-terms = ["vox", "vocal", "vocals", "chant", "adlib", "acapella", "hook", "shout", "phrase"]                
-weight = 0.9
-
-# --- loops & one-shots ------------------------------------------------------
-[[rules]] 
-tag = "loop"        
-terms = ["loop", "loops", "drumloop", "toploop", "melodyloop", "bassloop", "fill", "groove"]            
-weight = 0.9
-
-[[rules]] 
-tag = "one-shot"        
-terms = ["shot", "oneshot", "hit", "stab", "single"]            
 weight = 0.85
+max_depth = 10
 
-# --- fx & textures ----------------------------------------------------------
-[[rules]] 
-tag = "fx"          
-terms = ["fx", "sfx", "riser", "uplifter", "downlifter", "impact", "sweep", "whoosh", "drop", "glitch", "laser", "beep", "siren"]
+# =============================================================================
+# GENRES (Complete ADSR 38 Genres + Variants)
+# =============================================================================
+
+[[rules]]
+tag = "dubstep"
+kind = "genre"
+terms = ["dubstep", "riddim", "brostep", "deathstep", "tearout"]
 weight = 0.9
 
-[[rules]] 
-tag = "texture"     
-terms = ["texture", "noise", "vinyl", "crackle", "field", "foley", "ambient", "tape"]           
-weight = 0.85
-
-# --- genres -----------------------------------------------------------------
 [[rules]]
-tag = "trap"
-terms = ["trap", "drill", "jerk", "pluggnb", "plugg", "rage"]
-weight = 0.8
+tag = "dub"
+kind = "genre"
+terms = ["dub"]
+excludes = ["dubstep"]
+weight = 0.9
 
 [[rules]]
-tag = "hiphop"
-terms = ["hiphop", "boom", "boombap", "rap", "lofi"]
-weight = 0.8
+tag = "uk garage"
+kind = "genre"
+terms = ["uk garage", "ukg", "garridge", "2step", "speed garage", "bassline"]
+weight = 0.9
 
 [[rules]]
-tag = "house"
-terms = ["house", "techhouse", "deephouse", "disco", "garage"]
-weight = 0.8
+tag = "grime"
+kind = "genre"
+terms = ["grime", "grimy", "eski", "eskibeat"]
+weight = 0.9
+
+[[rules]]
+tag = "drum & bass"
+kind = "genre"
+terms = ["drum & bass", "drum and bass", "drum n bass", "drum bass", "dnb", "d'n'b", "d&b", "jungle", "liquid dnb", "neurofunk"]
+weight = 0.9
 
 [[rules]]
 tag = "techno"
-terms = ["techno", "minimal", "industrial", "trance", "ebm"]
+kind = "genre"
+terms = ["techno", "tekno", "minimal techno", "peak time techno", "dark techno"]
+weight = 0.9
+
+[[rules]]
+tag = "house"
+kind = "genre"
+terms = ["house", "haus", "hous", "techhouse", "tech house", "deephouse", "deep house", "electro house", "progressive house", "bass house"]
+weight = 0.9
+
+[[rules]]
+tag = "future house"
+kind = "genre"
+terms = ["future house", "futurehouse"]
+weight = 0.9
+
+[[rules]]
+tag = "hip hop"
+kind = "genre"
+terms = ["hip hop", "hiphop", "rap", "boom bap", "boombap", "east coast", "west coast"]
+weight = 0.9
+
+[[rules]]
+tag = "trap"
+kind = "genre"
+terms = ["trap", "drill", "uk drill", "ny drill", "jerk", "pluggnb", "plugg", "rage"]
+weight = 0.9
+
+[[rules]]
+tag = "crunk"
+kind = "genre"
+terms = ["crunk", "dirty south"]
+weight = 0.9
+
+[[rules]]
+tag = "future bass"
+kind = "genre"
+terms = ["future bass", "futurebass", "kawaii future bass", "heaven trap"]
+weight = 0.9
+
+[[rules]]
+tag = "future pop"
+kind = "genre"
+terms = ["future pop", "futurepop"]
+weight = 0.9
+
+[[rules]]
+tag = "ambient"
+kind = "genre"
+terms = ["ambient", "chill out", "chillout", "meditation", "soundscape"]
+weight = 0.85
+
+[[rules]]
+tag = "chillstep"
+kind = "genre"
+terms = ["chillstep"]
+weight = 0.9
+
+[[rules]]
+tag = "lo-fi"
+kind = "genre"
+terms = ["lo-fi", "lofi", "lo fi", "chillhop"]
+weight = 0.9
+
+[[rules]]
+tag = "synthwave"
+kind = "genre"
+terms = ["synthwave", "retrowave", "outrun", "vaporwave", "darksynth", "chillwave"]
+weight = 0.9
+
+[[rules]]
+tag = "trance"
+kind = "genre"
+terms = ["trance", "uplifting trance", "vocal trance", "eurodance"]
+weight = 0.9
+
+[[rules]]
+tag = "psy-trance"
+kind = "genre"
+terms = ["psy-trance", "psytrance", "goa", "psy trance", "progressive psy"]
+weight = 0.9
+
+[[rules]]
+tag = "hardstyle"
+kind = "genre"
+terms = ["hardstyle", "hardcore", "gabber", "frenchcore", "rawstyle"]
+weight = 0.9
+
+[[rules]]
+tag = "edm"
+kind = "genre"
+terms = ["edm", "dance", "club", "festival"]
+weight = 0.85
+
+[[rules]]
+tag = "electro"
+kind = "genre"
+terms = ["electro", "elektro"]
+excludes = ["electronic", "electronik"]
+weight = 0.85
+
+[[rules]]
+tag = "acid"
+kind = "genre"
+terms = ["acid", "acid house", "acid techno"]
+weight = 0.9
+
+[[rules]]
+tag = "industrial"
+kind = "genre"
+terms = ["industrial", "indust"]
+weight = 0.85
+
+[[rules]]
+tag = "ebm"
+kind = "genre"
+terms = ["ebm", "electronic body music"]
+weight = 0.9
+
+[[rules]]
+tag = "funk"
+kind = "genre"
+terms = ["funk", "funky", "p-funk", "boogie"]
+weight = 0.85
+
+[[rules]]
+tag = "disco"
+kind = "genre"
+terms = ["disco", "nu-disco", "nudisco", "italo disco"]
+weight = 0.85
+
+[[rules]]
+tag = "soul"
+kind = "genre"
+terms = ["soul", "neo soul", "neosoul", "motown"]
+weight = 0.85
+
+[[rules]]
+tag = "rnb"
+kind = "genre"
+terms = ["rnb", "r&b", "r n b"]
+weight = 0.85
+
+[[rules]]
+tag = "future rnb"
+kind = "genre"
+terms = ["future rnb", "future r&b", "future r n b"]
+weight = 0.9
+
+[[rules]]
+tag = "jazz"
+kind = "genre"
+terms = ["jazz", "jazzy", "bebop", "fusion"]
+weight = 0.85
+
+[[rules]]
+tag = "blues"
+kind = "genre"
+terms = ["blues"]
+weight = 0.85
+
+[[rules]]
+tag = "rock"
+kind = "genre"
+terms = ["rock", "rocknroll", "rockandroll", "metal", "punk", "indie rock"]
+weight = 0.85
+
+[[rules]]
+tag = "reggae"
+kind = "genre"
+terms = ["reggae", "roots reggae", "ska"]
+weight = 0.9
+
+[[rules]]
+tag = "dancehall"
+kind = "genre"
+terms = ["dancehall", "raggamuffin", "dembow"]
+weight = 0.9
+
+[[rules]]
+tag = "idm"
+kind = "genre"
+terms = ["idm", "intelligent dance music", "braindance", "glitch hop"]
+weight = 0.9
+
+[[rules]]
+tag = "folk"
+kind = "genre"
+terms = ["folk", "acoustic folk", "bluegrass"]
 weight = 0.8
 
 [[rules]]
-tag = "dnb"
-terms = ["dnb", "drumandbass", "jungle", "breakbeat", "breaks"]
+tag = "ovo"
+kind = "genre"
+terms = ["ovo", "ovo sound"]
+weight = 0.85
+
+[[rules]]
+tag = "experimental"
+kind = "genre"
+terms = ["experimental", "avantgarde", "noise music"]
 weight = 0.8
+
+# =============================================================================
+# DRUMS & PERCUSSION (ADSR Categories & Classic Gear)
+# =============================================================================
+
+[[rules]]
+tag = "drums"
+kind = "category"
+terms = ["drums", "drum", "drumkit", "drum kit", "flam"]
+weight = 1.0
+
+[[rules]]
+tag = "808"
+kind = "instrument"
+parent = "drums"
+terms = ["808", "808s", "sub808", "bass808", "jerk808", "808z"]
+weight = 1.0
+
+[[rules]]
+tag = "909"
+kind = "instrument"
+parent = "drums"
+terms = ["909", "909s", "tr909"]
+weight = 1.0
+
+[[rules]]
+tag = "707"
+kind = "instrument"
+parent = "drums"
+terms = ["707", "tr707"]
+weight = 1.0
+
+[[rules]]
+tag = "cr78"
+kind = "instrument"
+parent = "drums"
+terms = ["cr78", "cr-78"]
+weight = 1.0
+
+[[rules]]
+tag = "mpc"
+kind = "instrument"
+parent = "drums"
+terms = ["mpc", "mpc60", "mpc3000"]
+weight = 0.95
+
+[[rules]]
+tag = "linn"
+kind = "instrument"
+parent = "drums"
+terms = ["linn", "linndrum"]
+weight = 0.95
+
+[[rules]]
+tag = "drum machine"
+kind = "category"
+parent = "drums"
+terms = ["drum machine", "drummachine", "jomox", "jmx"]
+weight = 0.9
+
+[[rules]]
+tag = "kick"
+kind = "instrument"
+parent = "drums"
+terms = ["kick", "bd", "kik", "bassdrum", "bassdrm", "kickdrum", "kicks", "kikz"]
+weight = 1.0
+
+[[rules]]
+tag = "snare"
+kind = "instrument"
+parent = "drums"
+terms = ["snare", "sd", "snr", "snares", "snarz"]
+weight = 1.0
+
+[[rules]]
+tag = "clap"
+kind = "instrument"
+parent = "drums"
+terms = ["clap", "clp", "claps", "handclap", "snap", "snaps"]
+weight = 1.0
+
+[[rules]]
+tag = "tom"
+kind = "instrument"
+parent = "drums"
+terms = ["tom", "toms", "floortom", "racktom", "hitom", "lotom", "midtom", "floor tom"]
+weight = 1.0
+
+[[rules]]
+tag = "rim"
+kind = "instrument"
+parent = "drums"
+terms = ["rim", "rimshot", "stick", "sidestick", "cross"]
+weight = 1.0
+
+[[rules]]
+tag = "hihat"
+kind = "instrument"
+parent = "drums"
+terms = ["hihat", "hh", "hat", "hats", "closedhat", "pedal", "ch", "hhc", "closedhh", "closed hihat"]
+weight = 0.95
+
+[[rules]]
+tag = "openhat"
+kind = "instrument"
+parent = "drums"
+terms = ["openhat", "oh", "ohh", "openhh", "open hat", "open hihat"]
+weight = 1.0
+
+[[rules]]
+tag = "crash"
+kind = "instrument"
+parent = "drums"
+terms = ["crash", "splash", "splsh", "crsh"]
+weight = 1.0
+
+[[rules]]
+tag = "ride"
+kind = "instrument"
+parent = "drums"
+terms = ["ride", "rides", "ridecym", "ridecymbal", "ride cymbal"]
+weight = 1.0
+
+[[rules]]
+tag = "cymbal"
+kind = "instrument"
+parent = "drums"
+terms = ["cymbals", "cymbal", "cym", "cymb", "paiste", "zildjan", "china"]
+excludes = ["cymatic", "cymatics"]
+weight = 0.9
+
+[[rules]]
+tag = "tambourine"
+kind = "instrument"
+parent = "drums"
+terms = ["tambourine", "tamb"]
+weight = 1.0
+
+[[rules]]
+tag = "shaker"
+kind = "instrument"
+parent = "drums"
+terms = ["shaker", "shake", "shkr", "shk", "shekere", "cabasa", "maraca", "shakers"]
+weight = 1.0
+
+[[rules]]
+tag = "break"
+kind = "category"
+parent = "drums"
+terms = ["break", "beat", "drumbreak", "amen", "amen break"]
+weight = 0.9
+
+[[rules]]
+tag = "percussion"
+kind = "instrument"
+parent = "drums"
+terms = ["perc", "percs", "percussion", "bongo", "bongos", "conga", "congas", "cowbell", "woodblock", "agogo", "guiro", "clave", "claves", "cuica", "taiko", "tabla", "timbale", "djembe", "darabuka"]
+weight = 1.0
+
+# =============================================================================
+# INSTRUMENTS & SYNTHS (ADSR Taxonomy)
+# =============================================================================
+
+[[rules]]
+tag = "instruments"
+kind = "category"
+terms = ["instrument", "instruments", "inst"]
+weight = 0.9
+
+[[rules]]
+tag = "synth"
+kind = "instrument"
+terms = ["synth", "syn", "moog", "303", "tb303", "juno", "ms10", "ms20", "lead", "arp", "arpeggio", "pluck", "plk", "reese", "wobble", "supersaw"]
+weight = 0.9
+
+[[rules]]
+tag = "fm"
+kind = "instrument"
+parent = "synth"
+terms = ["fm", "fm7", "fm8", "dx7", "dx100", "tx81"]
+excludes = ["fmaj", "fmin"]
+weight = 0.9
+
+[[rules]]
+tag = "keys"
+kind = "instrument"
+terms = ["keys", "keyboard", "rhodes", "piano", "organ", "clavinet", "harpsichord", "tines", "wurlitzer"]
+weight = 0.9
+
+[[rules]]
+tag = "bass"
+kind = "instrument"
+terms = ["bass", "sub", "subbass", "synthbass", "bassguitar", "bass guitar", "pluckedbass", "reese", "wobble"]
+weight = 0.9
+
+[[rules]]
+tag = "strings"
+kind = "instrument"
+terms = ["strings", "string", "strng", "str", "violin", "viola", "cello", "double bass", "harp", "pizz", "quartet"]
+weight = 0.9
+
+[[rules]]
+tag = "brass"
+kind = "instrument"
+terms = ["brass", "horn", "horns", "trumpet", "trombone", "tuba", "french horn", "sax", "saxophone"]
+weight = 0.9
+
+[[rules]]
+tag = "woodwind"
+kind = "instrument"
+terms = ["woodwind", "flute", "piccolo", "recorder", "clarinet", "oboe", "bassoon"]
+weight = 0.9
+
+[[rules]]
+tag = "guitar"
+kind = "instrument"
+terms = ["guitar", "guit", "strum", "acoustic guitar", "electric guitar"]
+weight = 0.9
+
+[[rules]]
+tag = "mallet"
+kind = "instrument"
+terms = ["mallet", "xylophone", "marimba", "glockenspiel", "vibraphone", "kalimba"]
+weight = 0.9
+
+[[rules]]
+tag = "orchestra"
+kind = "instrument"
+terms = ["orchestra", "orch", "orchestral"]
+weight = 0.9
+
+[[rules]]
+tag = "sitar"
+kind = "instrument"
+terms = ["sitar", "balalaika", "lute"]
+weight = 0.9
+
+# =============================================================================
+# STYLES & CHARACTER (ADSR Taxonomy)
+# =============================================================================
+
+[[rules]]
+tag = "electronic"
+kind = "character"
+terms = ["electronic", "electronik", "digital"]
+weight = 0.8
+
+[[rules]]
+tag = "acoustic"
+kind = "character"
+terms = ["acoustic", "acou"]
+weight = 0.85
+
+[[rules]]
+tag = "analog"
+kind = "character"
+terms = ["analog", "analogue", "ana", "tape", "warm"]
+weight = 0.85
+
+[[rules]]
+tag = "chord"
+kind = "character"
+terms = ["chord", "chrd", "chords"]
+weight = 0.85
+
+[[rules]]
+tag = "stab"
+kind = "character"
+terms = ["stab", "stabs"]
+weight = 0.85
+
+[[rules]]
+tag = "drone"
+kind = "character"
+terms = ["drone", "dron"]
+weight = 0.85
+
+[[rules]]
+tag = "pad"
+kind = "character"
+terms = ["pad", "pads", "atmo", "atmosphere"]
+weight = 0.9
+
+[[rules]]
+tag = "dusty"
+kind = "character"
+terms = ["dusty", "vinyl", "crackle"]
+weight = 0.85
+
+[[rules]]
+tag = "distorted"
+kind = "character"
+terms = ["distorted", "distort", "saturation", "overdrive", "fuzz"]
+weight = 0.85
+
+[[rules]]
+tag = "melodic"
+kind = "character"
+terms = ["melodic", "melod", "melody"]
+weight = 0.85
+
+# =============================================================================
+# TYPES (Loop vs One-Shot)
+# =============================================================================
+
+[[rules]]
+tag = "loop"
+kind = "category"
+terms = ["loop", "loops", "drumloop", "toploop", "melodyloop", "bassloop", "fill", "groove"]
+weight = 0.95
+
+[[rules]]
+tag = "one-shot"
+kind = "category"
+terms = ["shot", "oneshot", "hit", "single"]
+weight = 0.9
+
+# =============================================================================
+# FX & FOLEY (ADSR Taxonomy)
+# =============================================================================
+
+[[rules]]
+tag = "fx"
+kind = "category"
+terms = ["fx", "sfx", "riser", "uplifter", "downlifter", "impact", "sweep", "whoosh", "drop", "glitch", "laser", "lazer", "siren", "noise", "swell", "texture"]
+weight = 0.9
+
+[[rules]]
+tag = "foley"
+kind = "category"
+terms = ["foley", "field", "traffic", "vehicle", "sports", "water"]
+weight = 0.85
+
+# =============================================================================
+# VOCALS (ADSR Taxonomy)
+# =============================================================================
+
+[[rules]]
+tag = "vocal"
+kind = "category"
+terms = ["vox", "vocal", "vocals", "chant", "adlib", "acapella", "hook", "shout", "phrase", "choir", "voice", "vocoded"]
+weight = 0.95
