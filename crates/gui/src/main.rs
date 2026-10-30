@@ -1,17 +1,18 @@
 //! Scout GUI — Complete Native Rust Audio Sample Manager.
-//! Clean-room implementation modeled after ADSR Sample Manager:
-//! instant FTS search, multi-facet tag taxonomy, interactive waveform scrubber,
-//! real-time pitch transposition (-12 to +12 st), low-latency audio auditioning,
-//! background library indexing, and native ADSR database importing.
+//! Modeled after ADSR Sample Manager with high-contrast grayscale theme,
+//! full vim key navigation, resilient audio auditioning, macOS menu bar,
+//! right-click context menus, and drag-and-drop export.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossbeam::channel::Receiver;
-use eframe::egui::{self, Align, Color32, CornerRadius, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{
+    self, Align, Color32, CornerRadius, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
+};
 use egui_extras::{Column, TableBuilder};
 
 use scout_audio::{Decoded, Player};
@@ -20,9 +21,23 @@ use scout_import_adsr::ImportReport;
 use scout_scanner::{ScanEvent, ScanHandle, ScanOptions};
 use scout_search::{FileRow, SearchQuery, Sort};
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum FocusArea {
+    SearchBox,
+    SampleList,
+}
+
 struct SampleManagerApp {
     db_path: PathBuf,
     db: Db,
+
+    // Navigation and Focus state
+    focus_area: FocusArea,
+    request_search_focus: bool,
+    pending_vim_g: Option<Instant>,
+    pending_vim_y: Option<Instant>,
+    status_toast: Option<(String, Instant)>,
+    show_vim_help: bool,
 
     // Filters and search state
     search_text: String,
@@ -60,7 +75,7 @@ struct SampleManagerApp {
     // Library scanning state
     is_scanning: bool,
     scan_status: String,
-    scan_progress: (u64, u64, u64), // seen, new, changed
+    scan_progress: (u64, u64, u64),
     scan_rx: Option<Receiver<ScanEvent>>,
     scan_handle: Option<ScanHandle>,
     new_root_path: String,
@@ -81,6 +96,12 @@ impl SampleManagerApp {
         let mut app = Self {
             db_path,
             db,
+            focus_area: FocusArea::SampleList,
+            request_search_focus: false,
+            pending_vim_g: None,
+            pending_vim_y: None,
+            status_toast: None,
+            show_vim_help: false,
             search_text: String::new(),
             selected_root: None,
             selected_tags: HashSet::new(),
@@ -328,6 +349,57 @@ impl SampleManagerApp {
         self.run_query();
     }
 
+    fn toggle_play(&mut self) {
+        if let Some(player) = &self.current_player {
+            if player.playing.load(Ordering::Relaxed) {
+                player.pause();
+            } else {
+                player.resume();
+            }
+        } else if let Some(path) = self.selected_full_path.clone() {
+            self.load_and_play(&path);
+        }
+    }
+
+    fn stop_play(&mut self) {
+        if let Some(player) = &self.current_player {
+            player.position.store(0, Ordering::Relaxed);
+            player.pause();
+        }
+    }
+
+    fn yank_selected_path(&mut self, ctx: &egui::Context) {
+        if let Some(path) = &self.selected_full_path {
+            let s = path.to_string_lossy().to_string();
+            ctx.copy_text(s.clone());
+            self.status_toast = Some((format!("Yanked path: {s}"), Instant::now()));
+        }
+    }
+
+    fn yank_selected_file(&mut self, ctx: &egui::Context) {
+        if let Some(path) = &self.selected_full_path {
+            let uri = format!("file://{}", path.to_string_lossy());
+            ctx.copy_text(uri);
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+            self.status_toast = Some((format!("Yanked file: {name} (ready to paste/drag into Finder/DAW)"), Instant::now()));
+        }
+    }
+
+    fn reveal_selected_file(&self) {
+        if let Some(path) = &self.selected_full_path {
+            #[cfg(target_os = "macos")]
+            {
+                let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if let Some(parent) = path.parent() {
+                    let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+                }
+            }
+        }
+    }
+
     fn start_library_scan(&mut self, root_id: i64) {
         let root_path: String = match self
             .db
@@ -353,7 +425,7 @@ impl SampleManagerApp {
         );
 
         self.is_scanning = true;
-        self.scan_status = format!("Scanning library #{root_id}...");
+        self.scan_status = format!("Scanning root #{root_id}...");
         self.scan_progress = (0, 0, 0);
         self.scan_rx = Some(rx);
         self.scan_handle = Some(handle);
@@ -394,67 +466,251 @@ impl SampleManagerApp {
     }
 
     fn handle_input(&mut self, ctx: &egui::Context) {
-        // Spacebar toggles Play/Pause
-        if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-            if let Some(player) = &self.current_player {
-                if player.playing.load(Ordering::Relaxed) {
-                    player.pause();
+        // Tab key cycles focus between SearchBox and SampleList
+        if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
+            match self.focus_area {
+                FocusArea::SearchBox => {
+                    self.focus_area = FocusArea::SampleList;
+                }
+                FocusArea::SampleList => {
+                    self.focus_area = FocusArea::SearchBox;
+                    self.request_search_focus = true;
+                }
+            }
+        }
+
+        // Global Escape key returns focus to SampleList
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.focus_area = FocusArea::SampleList;
+        }
+
+        if self.focus_area == FocusArea::SampleList {
+            // '/' enters SearchBox
+            if ctx.input(|i| i.key_pressed(egui::Key::Slash)) {
+                self.focus_area = FocusArea::SearchBox;
+                self.request_search_focus = true;
+            }
+
+            // 'j' or Down arrow: next sample
+            if ctx.input(|i| i.key_pressed(egui::Key::J) || i.key_pressed(egui::Key::ArrowDown)) {
+                let cur = self.selected_row_index.unwrap_or(0);
+                if cur + 1 < self.file_rows.len() {
+                    self.select_sample(cur + 1);
+                } else if !self.file_rows.is_empty() && self.selected_row_index.is_none() {
+                    self.select_sample(0);
+                }
+            }
+
+            // 'k' or Up arrow: previous sample
+            if ctx.input(|i| i.key_pressed(egui::Key::K) || i.key_pressed(egui::Key::ArrowUp)) {
+                let cur = self.selected_row_index.unwrap_or(0);
+                if cur > 0 {
+                    self.select_sample(cur - 1);
+                }
+            }
+
+            // 'h': toggle favorite on selected sample
+            if ctx.input(|i| i.key_pressed(egui::Key::H)) {
+                if let Some(idx) = self.selected_row_index {
+                    if let Some(row) = self.file_rows.get(idx) {
+                        self.toggle_favorite(row.id);
+                    }
+                }
+            }
+
+            // 'l', Spacebar, or Enter: play/pause
+            if ctx.input(|i| {
+                i.key_pressed(egui::Key::L)
+                    || i.key_pressed(egui::Key::Space)
+                    || i.key_pressed(egui::Key::Enter)
+            }) {
+                self.toggle_play();
+            }
+
+            // 'gg' or Shift+G navigation
+            let shift_g = ctx.input(|i| i.key_pressed(egui::Key::G) && i.modifiers.shift);
+            if shift_g {
+                if !self.file_rows.is_empty() {
+                    self.select_sample(self.file_rows.len() - 1);
+                }
+            } else if ctx.input(|i| i.key_pressed(egui::Key::G)) {
+                let now = Instant::now();
+                if let Some(prev) = self.pending_vim_g {
+                    if now.duration_since(prev).as_millis() < 600 {
+                        self.pending_vim_g = None;
+                        if !self.file_rows.is_empty() {
+                            self.select_sample(0);
+                        }
+                    } else {
+                        self.pending_vim_g = Some(now);
+                    }
                 } else {
-                    player.resume();
+                    self.pending_vim_g = Some(now);
                 }
-            } else if let Some(path) = self.selected_full_path.clone() {
-                self.load_and_play(&path);
+            }
+
+            // 'yp' or 'yy' yank operations
+            if ctx.input(|i| i.key_pressed(egui::Key::Y)) {
+                let now = Instant::now();
+                if let Some(prev) = self.pending_vim_y {
+                    if now.duration_since(prev).as_millis() < 800 {
+                        // 'yy': yank file
+                        self.pending_vim_y = None;
+                        self.yank_selected_file(ctx);
+                    } else {
+                        self.pending_vim_y = Some(now);
+                    }
+                } else {
+                    self.pending_vim_y = Some(now);
+                }
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::P)) {
+                if let Some(prev) = self.pending_vim_y {
+                    if Instant::now().duration_since(prev).as_millis() < 800 {
+                        // 'yp': yank path
+                        self.pending_vim_y = None;
+                        self.yank_selected_path(ctx);
+                    }
+                }
+            }
+
+            // '?' shows vim cheat sheet
+            if ctx.input(|i| i.key_pressed(egui::Key::Questionmark)) {
+                self.show_vim_help = true;
             }
         }
 
-        // Arrow keys navigate samples
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            if let Some(idx) = self.selected_row_index {
-                if idx + 1 < self.file_rows.len() {
-                    self.select_sample(idx + 1);
-                }
-            } else if !self.file_rows.is_empty() {
-                self.select_sample(0);
-            }
-        }
-
-        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            if let Some(idx) = self.selected_row_index {
-                if idx > 0 {
-                    self.select_sample(idx - 1);
-                }
-            }
-        }
-
-        // Animate playhead while playing
+        // Repaint animation during playback
         if let Some(player) = &self.current_player {
             if player.playing.load(Ordering::Relaxed) {
-                ctx.request_repaint_after(Duration::from_millis(30));
+                ctx.request_repaint_after(Duration::from_millis(25));
             }
         }
+    }
+
+    fn render_menu_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.button("Add Library Folder...").clicked() {
+                    self.show_add_modal = true;
+                    ui.close();
+                }
+                if ui.button("Import ADSR Database...").clicked() {
+                    self.show_adsr_modal = true;
+                    ui.close();
+                }
+                ui.separator();
+                if let Some(rid) = self.selected_root {
+                    if ui.button("Rescan Current Library").clicked() {
+                        self.start_library_scan(rid);
+                        ui.close();
+                    }
+                }
+                if ui.button("Reveal Selected in File Manager").clicked() {
+                    self.reveal_selected_file();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+
+            ui.menu_button("Edit", |ui| {
+                if ui.button("Yank Path (yp)").clicked() {
+                    self.yank_selected_path(ctx);
+                    ui.close();
+                }
+                if ui.button("Yank File (yy)").clicked() {
+                    self.yank_selected_file(ctx);
+                    ui.close();
+                }
+                if ui.button("Toggle Favorite (h)").clicked() {
+                    if let Some(idx) = self.selected_row_index {
+                        if let Some(row) = self.file_rows.get(idx) {
+                            self.toggle_favorite(row.id);
+                        }
+                    }
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Clear Search (Esc)").clicked() {
+                    self.search_text.clear();
+                    self.run_query();
+                    ui.close();
+                }
+            });
+
+            ui.menu_button("Playback", |ui| {
+                if ui.button("Play / Pause (Space / L)").clicked() {
+                    self.toggle_play();
+                    ui.close();
+                }
+                if ui.button("Stop (⏹)").clicked() {
+                    self.stop_play();
+                    ui.close();
+                }
+                ui.separator();
+                if ui.checkbox(&mut self.loop_playback, "Loop Mode").changed() {
+                    if let Some(player) = &self.current_player {
+                        player.set_loop(self.loop_playback);
+                    }
+                }
+                ui.checkbox(&mut self.auto_audition, "Autoplay on Select");
+            });
+
+            ui.menu_button("Help", |ui| {
+                if ui.button("Vim Keybindings Cheat Sheet (?)").clicked() {
+                    self.show_vim_help = true;
+                    ui.close();
+                }
+            });
+
+            // Status message toast in menu bar
+            if let Some((msg, time)) = &self.status_toast {
+                if Instant::now().duration_since(*time).as_secs() < 4 {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(msg)
+                                .color(Color32::WHITE)
+                                .background_color(Color32::from_rgb(50, 50, 50))
+                                .strong(),
+                        );
+                    });
+                }
+            }
+        });
     }
 
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             // Logo / Branding
-            ui.heading(egui::RichText::new("SCOUT").strong().color(Color32::from_rgb(0, 229, 255)));
-            ui.label(egui::RichText::new("SAMPLE MANAGER").size(11.0).color(Color32::from_rgb(140, 150, 165)));
+            ui.label(egui::RichText::new("SCOUT").size(15.0).strong().color(Color32::WHITE));
+            ui.label(egui::RichText::new("SAMPLE MANAGER").size(11.0).color(Color32::from_rgb(180, 180, 180)));
 
             ui.separator();
 
-            // Live Search
+            // Search box with focus handling
             ui.label("Search:");
-            let search_resp = ui.add(
-                egui::TextEdit::singleline(&mut self.search_text)
-                    .hint_text("Sound, tag, or path...")
-                    .desired_width(200.0),
-            );
+            let search_edit = egui::TextEdit::singleline(&mut self.search_text)
+                .hint_text("Press / to search...")
+                .desired_width(190.0);
+            let search_resp = ui.add(search_edit);
+
+            if self.request_search_focus {
+                search_resp.request_focus();
+                self.request_search_focus = false;
+            }
+            if search_resp.has_focus() {
+                self.focus_area = FocusArea::SearchBox;
+            }
             if search_resp.changed() {
                 self.run_query();
             }
             if !self.search_text.is_empty() {
-                if ui.button("✖").clicked() {
+                if ui.button("X").on_hover_text("Clear search").clicked() {
                     self.search_text.clear();
                     self.run_query();
                 }
@@ -495,22 +751,22 @@ impl SampleManagerApp {
             let bmin = ui.add(
                 egui::TextEdit::singleline(&mut self.bpm_min)
                     .hint_text("Min")
-                    .desired_width(40.0),
+                    .desired_width(38.0),
             );
             ui.label("-");
             let bmax = ui.add(
                 egui::TextEdit::singleline(&mut self.bpm_max)
                     .hint_text("Max")
-                    .desired_width(40.0),
+                    .desired_width(38.0),
             );
             if bmin.changed() || bmax.changed() {
                 self.run_query();
             }
 
-            // Loop / One-shot Filter
+            // Type Filter
             let all_btn = ui.selectable_label(self.filter_loop.is_none(), "All");
             let loop_btn = ui.selectable_label(self.filter_loop == Some(true), "Loops");
-            let one_btn = ui.selectable_label(self.filter_loop == Some(false), "One-Shots");
+            let one_btn = ui.selectable_label(self.filter_loop == Some(false), "Shots");
             if all_btn.clicked() {
                 self.filter_loop = None;
                 self.run_query();
@@ -524,34 +780,30 @@ impl SampleManagerApp {
                 self.run_query();
             }
 
-            // Favorite Filter
-            let fav_btn = ui.selectable_label(self.filter_favorite, "★ Favs");
+            // Favorites Filter
+            let fav_btn = ui.selectable_label(self.filter_favorite, "[*] Favs");
             if fav_btn.clicked() {
                 self.filter_favorite = !self.filter_favorite;
                 self.run_query();
             }
 
             // Random discovery
-            if ui.button("🎲 Random").on_hover_text("Select a random sample from current filters").clicked() {
+            if ui.button("[RANDOM]").on_hover_text("Audition a random sample from current results").clicked() {
                 if !self.file_rows.is_empty() {
-                    let rand_idx = (std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .subsec_nanos() as usize)
-                        % self.file_rows.len();
+                    let rand_idx = (Instant::now().elapsed().subsec_nanos() as usize) % self.file_rows.len();
                     self.select_sample(rand_idx);
                 }
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("+ Add Folder").clicked() {
+                if ui.button("[+] FOLDER").clicked() {
                     self.show_add_modal = true;
                 }
-                if ui.button("📥 Import ADSR DB").clicked() {
+                if ui.button("IMPORT ADSR").clicked() {
                     self.show_adsr_modal = true;
                 }
                 if let Some(rid) = self.selected_root {
-                    if ui.button("🔄 Rescan").clicked() {
+                    if ui.button("RESCAN").clicked() {
                         self.start_library_scan(rid);
                     }
                 }
@@ -563,20 +815,20 @@ impl SampleManagerApp {
     fn render_bottom_panel(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
 
-        // Waveform Visualizer Area
+        // High-contrast Waveform Visualizer
         let desired_size = Vec2::new(ui.available_width(), 76.0);
         let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
         // Container frame
-        painter.rect_filled(rect, CornerRadius::same(6), Color32::from_rgb(18, 20, 26));
-        painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, Color32::from_rgb(35, 42, 54)), StrokeKind::Inside);
+        painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(14, 14, 14));
+        painter.rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, Color32::from_rgb(90, 90, 90)), StrokeKind::Inside);
 
-        // Zero-crossing line
+        // Center line
         let center_y = rect.center().y;
         painter.line_segment(
             [Pos2::new(rect.left(), center_y), Pos2::new(rect.right(), center_y)],
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+            Stroke::new(1.0, Color32::from_rgb(70, 70, 70)),
         );
 
         // Draw waveform peaks
@@ -589,23 +841,20 @@ impl SampleManagerApp {
                 let bar_h = (peak * (rect.height() * 0.44)).max(1.0);
                 let bar_rect = Rect::from_min_max(
                     Pos2::new(x, center_y - bar_h),
-                    Pos2::new(x + (bar_width * 0.75).max(1.0), center_y + bar_h),
+                    Pos2::new(x + (bar_width * 0.8).max(1.0), center_y + bar_h),
                 );
-                // Gradient cyan-teal
-                let color = Color32::from_rgb(
-                    (10.0 + peak * 50.0) as u8,
-                    (170.0 + peak * 75.0).min(255.0) as u8,
-                    255,
-                );
-                painter.rect_filled(bar_rect, CornerRadius::same(1), color);
+                // Bright high-contrast grayscale peaks
+                let luma = (180.0 + peak * 75.0).min(255.0) as u8;
+                let color = Color32::from_rgb(luma, luma, luma);
+                painter.rect_filled(bar_rect, CornerRadius::ZERO, color);
             }
         } else {
             painter.text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Select a sample to audition waveform and preview",
+                "Select a sample to audition waveform (Press Space / L to Play)",
                 egui::FontId::proportional(13.0),
-                Color32::from_rgb(85, 95, 115),
+                Color32::from_rgb(170, 170, 170),
             );
         }
 
@@ -617,17 +866,17 @@ impl SampleManagerApp {
 
             let playhead_x = rect.left() + progress * rect.width();
 
-            // Played region tint
+            // Progress tint (medium gray)
             let played_rect = Rect::from_min_max(rect.min, Pos2::new(playhead_x, rect.max.y));
-            painter.rect_filled(played_rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(0, 229, 255, 22));
+            painter.rect_filled(played_rect, CornerRadius::ZERO, Color32::from_rgba_unmultiplied(255, 255, 255, 25));
 
-            // Playhead scrubber line
+            // Solid high-contrast playhead
             painter.line_segment(
                 [Pos2::new(playhead_x, rect.top()), Pos2::new(playhead_x, rect.bottom())],
-                Stroke::new(2.5, Color32::from_rgb(255, 175, 0)),
+                Stroke::new(2.5, Color32::WHITE),
             );
 
-            // Scrubbing interaction
+            // Click/drag to scrub
             if response.clicked() || response.dragged() {
                 if let Some(pointer_pos) = response.interact_pointer_pos() {
                     let norm_x = ((pointer_pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
@@ -647,24 +896,13 @@ impl SampleManagerApp {
                 .map(|p| p.playing.load(Ordering::Relaxed))
                 .unwrap_or(false);
 
-            let play_label = if is_playing { "⏸ Pause" } else { "▶ Play" };
+            let play_label = if is_playing { "PAUSE (L)" } else { "PLAY (L)" };
             if ui.button(egui::RichText::new(play_label).strong()).clicked() {
-                if let Some(player) = &self.current_player {
-                    if is_playing {
-                        player.pause();
-                    } else {
-                        player.resume();
-                    }
-                } else if let Some(path) = self.selected_full_path.clone() {
-                    self.load_and_play(&path);
-                }
+                self.toggle_play();
             }
 
-            if ui.button("⏹ Stop").clicked() {
-                if let Some(player) = &self.current_player {
-                    player.position.store(0, Ordering::Relaxed);
-                    player.pause();
-                }
+            if ui.button("STOP").clicked() {
+                self.stop_play();
             }
 
             ui.separator();
@@ -679,9 +917,9 @@ impl SampleManagerApp {
 
             ui.separator();
 
-            // Pitch Transpose (-12 to +12 Semitones) - ADSR signature feature
+            // Pitch Transposition (-12 to +12 st)
             ui.label("Pitch:");
-            if ui.small_button("-").clicked() {
+            if ui.button("-").clicked() {
                 self.pitch_semitones = (self.pitch_semitones - 1).max(-12);
                 if let Some(player) = &self.current_player {
                     player.set_pitch(self.pitch_semitones);
@@ -704,7 +942,7 @@ impl SampleManagerApp {
                 }
             }
 
-            if ui.small_button("+").clicked() {
+            if ui.button("+").clicked() {
                 self.pitch_semitones = (self.pitch_semitones + 1).min(12);
                 if let Some(player) = &self.current_player {
                     player.set_pitch(self.pitch_semitones);
@@ -726,7 +964,7 @@ impl SampleManagerApp {
                 }
             }
 
-            // Time Clock Display
+            // Duration Clock Display
             if let (Some(player), Some(decoded)) = (&self.current_player, &self.current_decoded) {
                 let total_secs = decoded.duration_secs();
                 let cur_samples = player.position.load(Ordering::Relaxed);
@@ -734,20 +972,17 @@ impl SampleManagerApp {
                 let cur_secs = (cur_samples / num_ch) as f32 / decoded.sample_rate.max(1) as f32;
                 ui.label(
                     egui::RichText::new(format!("{:04.1}s / {:04.1}s", cur_secs, total_secs))
-                        .size(11.0)
-                        .color(Color32::from_rgb(180, 190, 205)),
+                        .size(11.5)
+                        .strong()
+                        .color(Color32::WHITE),
                 );
             }
 
-            // Current Sample Pill
+            // Selected sample info badge
             if let Some(idx) = self.selected_row_index {
                 if let Some(row) = self.file_rows.get(idx) {
                     ui.separator();
-                    ui.label(
-                        egui::RichText::new(&row.name)
-                            .color(Color32::from_rgb(0, 229, 255))
-                            .strong(),
-                    );
+                    ui.label(egui::RichText::new(&row.name).strong().color(Color32::WHITE));
                 }
             }
 
@@ -759,7 +994,7 @@ impl SampleManagerApp {
                 ui.label(
                     egui::RichText::new(&self.scan_status)
                         .size(11.0)
-                        .color(Color32::from_rgb(150, 160, 175)),
+                        .color(Color32::from_rgb(190, 190, 190)),
                 );
             });
         });
@@ -769,31 +1004,34 @@ impl SampleManagerApp {
         ui.add_space(4.0);
 
         // Section: Libraries
-        ui.heading(egui::RichText::new("LIBRARIES").size(12.0).color(Color32::from_rgb(150, 160, 180)));
+        ui.label(egui::RichText::new("LIBRARIES").size(12.0).strong().color(Color32::WHITE));
         let roots_clone = self.roots.clone();
         let mut root_to_select = None;
         let mut clear_root = false;
 
-        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-            let all_libs = ui.selectable_label(self.selected_root.is_none(), "All Libraries");
-            if all_libs.clicked() {
-                clear_root = true;
-            }
-
-            for (rid, path, count) in &roots_clone {
-                let folder_name = Path::new(path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(path.as_str());
-
-                let is_sel = self.selected_root == Some(*rid);
-                let label_text = format!("📁 {} ({})", folder_name, count);
-                let resp = ui.selectable_label(is_sel, label_text).on_hover_text(path);
-                if resp.clicked() {
-                    root_to_select = Some(*rid);
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar_libraries_scroll")
+            .max_height(150.0)
+            .show(ui, |ui| {
+                let all_libs = ui.selectable_label(self.selected_root.is_none(), "All Libraries");
+                if all_libs.clicked() {
+                    clear_root = true;
                 }
-            }
-        });
+
+                for (rid, path, count) in &roots_clone {
+                    let folder_name = Path::new(path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(path.as_str());
+
+                    let is_sel = self.selected_root == Some(*rid);
+                    let label_text = format!(":: {} ({})", folder_name, count);
+                    let resp = ui.selectable_label(is_sel, label_text).on_hover_text(path);
+                    if resp.clicked() {
+                        root_to_select = Some(*rid);
+                    }
+                }
+            });
 
         if clear_root {
             self.selected_root = None;
@@ -807,10 +1045,10 @@ impl SampleManagerApp {
 
         // Section: Tag Taxonomy
         ui.horizontal(|ui| {
-            ui.heading(egui::RichText::new("TAG TAXONOMY").size(12.0).color(Color32::from_rgb(150, 160, 180)));
+            ui.label(egui::RichText::new("TAG TAXONOMY").size(12.0).strong().color(Color32::WHITE));
             if !self.selected_tags.is_empty() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("Clear").clicked() {
+                    if ui.button("Clear").clicked() {
                         self.selected_tags.clear();
                         self.run_query();
                     }
@@ -822,39 +1060,46 @@ impl SampleManagerApp {
         let tags_clone = self.tags.clone();
         let mut toggle_tag = None;
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let mut by_kind: std::collections::BTreeMap<String, Vec<(i64, String, i64)>> =
-                std::collections::BTreeMap::new();
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar_tags_scroll")
+            .show(ui, |ui| {
+                let mut by_kind: std::collections::BTreeMap<String, Vec<(i64, String, i64)>> =
+                    std::collections::BTreeMap::new();
 
-            for (tid, name, kind, count) in &tags_clone {
-                by_kind
-                    .entry(kind.clone())
-                    .or_default()
-                    .push((*tid, name.clone(), *count));
-            }
+                for (tid, name, kind, count) in &tags_clone {
+                    by_kind
+                        .entry(kind.clone())
+                        .or_default()
+                        .push((*tid, name.clone(), *count));
+                }
 
-            for (kind, group) in by_kind {
-                let title = match kind.as_str() {
-                    "category" => "Categories",
-                    "genre" => "Genres",
-                    "instrument" => "Instruments",
-                    "character" => "Character",
-                    _ => "Other Tags",
-                };
+                for (kind, group) in by_kind {
+                    let title = match kind.as_str() {
+                        "category" => "CATEGORIES",
+                        "genre" => "GENRES",
+                        "instrument" => "INSTRUMENTS",
+                        "character" => "CHARACTER",
+                        _ => "OTHER TAGS",
+                    };
 
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(title).size(11.0).strong().color(Color32::from_rgb(120, 135, 155)));
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(title)
+                            .size(11.0)
+                            .strong()
+                            .color(Color32::from_rgb(180, 180, 180)),
+                    );
 
-                for (tid, name, count) in group {
-                    let is_active = self.selected_tags.contains(&tid);
-                    let tag_label = format!("{} ({})", name, count);
-                    let resp = ui.selectable_label(is_active, tag_label);
-                    if resp.clicked() {
-                        toggle_tag = Some(tid);
+                    for (tid, name, count) in group {
+                        let is_active = self.selected_tags.contains(&tid);
+                        let tag_label = format!("{} ({})", name, count);
+                        let resp = ui.selectable_label(is_active, tag_label);
+                        if resp.clicked() {
+                            toggle_tag = Some(tid);
+                        }
                     }
                 }
-            }
-        });
+            });
 
         if let Some(tid) = toggle_tag {
             if self.selected_tags.contains(&tid) {
@@ -867,24 +1112,31 @@ impl SampleManagerApp {
     }
 
     fn render_central_table(&mut self, ui: &mut egui::Ui) {
-        // Table Action & Status Header
+        // Table Action & Drag Export Header
         ui.horizontal(|ui| {
             ui.label(
                 egui::RichText::new(format!("Showing {} of {} samples", self.file_rows.len(), self.total_results))
                     .size(11.5)
-                    .color(Color32::from_rgb(130, 140, 155)),
+                    .strong()
+                    .color(Color32::WHITE),
             );
 
-            if let Some(path) = &self.selected_full_path {
+            if self.selected_full_path.is_some() {
                 ui.separator();
-                if ui.button("📋 Copy Path").on_hover_text("Copy absolute sample file path to clipboard").clicked() {
-                    ui.ctx().copy_text(path.to_string_lossy().to_string());
+                if ui.button("YANK PATH (yp)").on_hover_text("Copy absolute file path to clipboard").clicked() {
+                    self.yank_selected_path(ui.ctx());
+                }
+                if ui.button("YANK FILE (yy)").on_hover_text("Copy audio file (ready to paste/drag in Finder or DAW)").clicked() {
+                    self.yank_selected_file(ui.ctx());
+                }
+                if ui.button("REVEAL").on_hover_text("Reveal selected file in Finder / File Manager").clicked() {
+                    self.reveal_selected_file();
                 }
                 if let Some((channels, sr, _)) = self.selected_sample_info {
                     ui.label(
                         egui::RichText::new(format!("{}ch | {}Hz", channels, sr))
                             .size(11.0)
-                            .color(Color32::from_rgb(110, 120, 135)),
+                            .color(Color32::from_rgb(190, 190, 190)),
                     );
                 }
             }
@@ -895,27 +1147,30 @@ impl SampleManagerApp {
             .striped(true)
             .resizable(true)
             .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::exact(26.0)) // Audition Play/Pause
-            .column(Column::exact(26.0)) // Favorite Star
+            .column(Column::exact(32.0)) // Audition Play/Pause
+            .column(Column::exact(32.0)) // Favorite Star
             .column(Column::initial(240.0).at_least(140.0)) // Name
             .column(Column::initial(65.0).at_least(45.0)) // Key
             .column(Column::initial(65.0).at_least(45.0)) // BPM
             .column(Column::initial(65.0).at_least(45.0)) // Duration
-            .column(Column::initial(50.0).at_least(40.0)) // Type
+            .column(Column::initial(55.0).at_least(45.0)) // Type
             .column(Column::initial(65.0).at_least(50.0)) // Size
             .column(Column::remainder()); // Relative Path
 
         let mut sample_to_select = None;
         let mut toggle_fav_id = None;
         let mut sort_changed = false;
+        let mut trigger_yank_path = false;
+        let mut trigger_yank_file = false;
+        let mut trigger_reveal = false;
 
         table
             .header(24.0, |mut header| {
                 header.col(|ui| {
-                    ui.strong("▶");
+                    ui.strong(">");
                 });
                 header.col(|ui| {
-                    ui.strong("★");
+                    ui.strong("*");
                 });
                 header.col(|ui| {
                     if ui.selectable_label(matches!(self.sort, Sort::NameAsc), "Name").clicked() {
@@ -956,12 +1211,12 @@ impl SampleManagerApp {
             })
             .body(|body| {
                 let num_rows = self.file_rows.len();
-                body.rows(22.0, num_rows, |mut row| {
+                body.rows(24.0, num_rows, |mut row| {
                     let idx = row.index();
                     let item = &self.file_rows[idx];
                     let is_selected = self.selected_row_index == Some(idx);
 
-                    // Audition play icon
+                    // Audition play column
                     row.col(|ui| {
                         let is_current_playing = is_selected
                             && self
@@ -970,14 +1225,9 @@ impl SampleManagerApp {
                                 .map(|p| p.playing.load(Ordering::Relaxed))
                                 .unwrap_or(false);
 
-                        let icon = if is_current_playing { "⏸" } else { "▶" };
-                        let color = if is_current_playing {
-                            Color32::from_rgb(0, 229, 255)
-                        } else {
-                            Color32::from_rgb(140, 150, 165)
-                        };
-
-                        if ui.button(egui::RichText::new(icon).color(color)).clicked() {
+                        let icon = if is_current_playing { "||" } else { ">" };
+                        let btn = ui.button(egui::RichText::new(icon).strong().color(Color32::WHITE));
+                        if btn.clicked() {
                             if is_current_playing {
                                 if let Some(player) = &self.current_player {
                                     player.pause();
@@ -988,37 +1238,68 @@ impl SampleManagerApp {
                         }
                     });
 
-                    // Star column
+                    // Favorite star column
                     row.col(|ui| {
-                        let star = if item.favorite { "★" } else { "☆" };
+                        let star = if item.favorite { "[*]" } else { "[ ]" };
                         let color = if item.favorite {
-                            Color32::from_rgb(255, 190, 0)
+                            Color32::WHITE
                         } else {
-                            Color32::from_rgb(80, 90, 105)
+                            Color32::from_rgb(140, 140, 140)
                         };
-                        if ui.button(egui::RichText::new(star).color(color)).clicked() {
+                        if ui.button(egui::RichText::new(star).strong().color(color)).clicked() {
                             toggle_fav_id = Some(item.id);
                         }
                     });
 
-                    // Name column
+                    // Name column (with right-click context menu)
                     row.col(|ui| {
-                        let name_text = egui::RichText::new(&item.name).strong();
+                        let name_text = egui::RichText::new(&item.name).strong().color(Color32::WHITE);
                         let resp = ui.selectable_label(is_selected, name_text);
                         if resp.clicked() {
                             sample_to_select = Some(idx);
                         }
+
+                        // Right Click Context Menu
+                        resp.context_menu(|ui| {
+                            ui.label(egui::RichText::new(&item.name).strong().color(Color32::WHITE));
+                            ui.separator();
+                            if ui.button("Play / Pause (Space / L)").clicked() {
+                                sample_to_select = Some(idx);
+                                ui.close();
+                            }
+                            let fav_label = if item.favorite { "Unfavorite (H)" } else { "Favorite (H)" };
+                            if ui.button(fav_label).clicked() {
+                                toggle_fav_id = Some(item.id);
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Yank Path (yp)").clicked() {
+                                sample_to_select = Some(idx);
+                                trigger_yank_path = true;
+                                ui.close();
+                            }
+                            if ui.button("Yank File (yy)").clicked() {
+                                sample_to_select = Some(idx);
+                                trigger_yank_file = true;
+                                ui.close();
+                            }
+                            if ui.button("Reveal in Finder / File Manager").clicked() {
+                                sample_to_select = Some(idx);
+                                trigger_reveal = true;
+                                ui.close();
+                            }
+                        });
                     });
 
                     // Musical Key column
                     row.col(|ui| {
-                        ui.label("--");
+                        ui.label(egui::RichText::new("--").color(Color32::from_rgb(200, 200, 200)));
                     });
 
                     // BPM column
                     row.col(|ui| {
                         let bpm_str = item.bpm.map(|b| format!("{:.0}", b)).unwrap_or_else(|| "--".to_string());
-                        ui.label(bpm_str);
+                        ui.label(egui::RichText::new(bpm_str).strong().color(Color32::WHITE));
                     });
 
                     // Duration column
@@ -1027,24 +1308,20 @@ impl SampleManagerApp {
                             .duration_ms
                             .map(|d| format!("{:.2}s", d as f32 / 1000.0))
                             .unwrap_or_else(|| "--".to_string());
-                        ui.label(dur_str);
+                        ui.label(egui::RichText::new(dur_str).color(Color32::from_rgb(200, 200, 200)));
                     });
 
                     // Type (Loop / Shot)
                     row.col(|ui| {
                         let is_loop = item.rel_path.to_lowercase().contains("loop");
-                        let type_color = if is_loop {
-                            Color32::from_rgb(255, 170, 0)
-                        } else {
-                            Color32::from_rgb(0, 200, 255)
-                        };
-                        ui.label(egui::RichText::new(if is_loop { "Loop" } else { "Shot" }).color(type_color).size(11.0));
+                        let type_text = if is_loop { "LOOP" } else { "SHOT" };
+                        ui.label(egui::RichText::new(type_text).size(11.0).strong().color(Color32::WHITE));
                     });
 
                     // Size column
                     row.col(|ui| {
                         let size_kb = item.size as f32 / 1024.0;
-                        ui.label(format!("{:.1} KB", size_kb));
+                        ui.label(egui::RichText::new(format!("{:.1} KB", size_kb)).color(Color32::from_rgb(200, 200, 200)));
                     });
 
                     // Relative path
@@ -1052,7 +1329,7 @@ impl SampleManagerApp {
                         ui.label(
                             egui::RichText::new(&item.rel_path)
                                 .size(11.0)
-                                .color(Color32::from_rgb(120, 130, 145)),
+                                .color(Color32::from_rgb(180, 180, 180)),
                         );
                     });
                 });
@@ -1063,6 +1340,15 @@ impl SampleManagerApp {
         }
         if let Some(id) = toggle_fav_id {
             self.toggle_favorite(id);
+        }
+        if trigger_yank_path {
+            self.yank_selected_path(ui.ctx());
+        }
+        if trigger_yank_file {
+            self.yank_selected_file(ui.ctx());
+        }
+        if trigger_reveal {
+            self.reveal_selected_file();
         }
         if sort_changed {
             self.run_query();
@@ -1127,7 +1413,7 @@ impl SampleManagerApp {
                     ui.checkbox(&mut self.adsr_dry_run, "Dry run (inspect and verify schema only)");
 
                     if let Some(err) = &self.adsr_error {
-                        ui.label(egui::RichText::new(format!("Error: {err}")).color(Color32::from_rgb(255, 80, 80)));
+                        ui.label(egui::RichText::new(format!("Error: {err}")).color(Color32::WHITE));
                     }
 
                     if let Some(rep) = &self.adsr_report {
@@ -1138,7 +1424,7 @@ impl SampleManagerApp {
                         if !rep.dry_run {
                             ui.label(
                                 egui::RichText::new("Import completed successfully!")
-                                    .color(Color32::from_rgb(0, 220, 130))
+                                    .color(Color32::WHITE)
                                     .strong(),
                             );
                         }
@@ -1171,27 +1457,108 @@ impl SampleManagerApp {
                     });
                 });
         }
+
+        // Modal: Vim Keybindings Help
+        if self.show_vim_help {
+            egui::Window::new("Vim Keybindings Cheat Sheet")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.heading("Scout Vim Navigation");
+                    ui.separator();
+                    ui.label(egui::RichText::new("/            - Focus Search Box").strong());
+                    ui.label(egui::RichText::new("<Tab> / <Esc> - Switch focus to Sample List").strong());
+                    ui.label(egui::RichText::new("j / <Down>   - Move Down one sample").strong());
+                    ui.label(egui::RichText::new("k / <Up>     - Move Up one sample").strong());
+                    ui.label(egui::RichText::new("h            - Toggle Favorite [*]").strong());
+                    ui.label(egui::RichText::new("l / <Space>  - Play / Pause audition").strong());
+                    ui.label(egui::RichText::new("gg           - Jump to First sample").strong());
+                    ui.label(egui::RichText::new("G            - Jump to Last sample").strong());
+                    ui.label(egui::RichText::new("yp           - Yank Path (copies absolute path)").strong());
+                    ui.label(egui::RichText::new("yy           - Yank File (copies file for Finder/DAW)").strong());
+                    ui.separator();
+                    if ui.button("Close (Esc)").clicked() {
+                        self.show_vim_help = false;
+                    }
+                });
+        }
     }
+}
+
+fn apply_high_contrast_theme(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
+    visuals.override_text_color = Some(Color32::WHITE);
+
+    // Deep high-contrast backgrounds
+    visuals.window_fill = Color32::from_rgb(18, 18, 18);
+    visuals.panel_fill = Color32::from_rgb(14, 14, 14);
+    visuals.faint_bg_color = Color32::from_rgb(24, 24, 24);
+    visuals.extreme_bg_color = Color32::from_rgb(8, 8, 8);
+
+    // High-contrast window stroke
+    visuals.window_stroke = Stroke::new(1.0, Color32::from_rgb(120, 120, 120));
+
+    // Inactive buttons and widgets
+    visuals.widgets.inactive.bg_fill = Color32::from_rgb(26, 26, 26);
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(80, 80, 80));
+    visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(230, 230, 230));
+
+    // Hovered widgets
+    visuals.widgets.hovered.bg_fill = Color32::from_rgb(45, 45, 45);
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, Color32::from_rgb(200, 200, 200));
+    visuals.widgets.hovered.fg_stroke = Stroke::new(1.5, Color32::WHITE);
+
+    // Active widgets
+    visuals.widgets.active.bg_fill = Color32::from_rgb(70, 70, 70);
+    visuals.widgets.active.bg_stroke = Stroke::new(2.0, Color32::WHITE);
+    visuals.widgets.active.fg_stroke = Stroke::new(2.0, Color32::WHITE);
+
+    // Noninteractive labels and frames
+    visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(14, 14, 14);
+    visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, Color32::from_rgb(70, 70, 70));
+    visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(220, 220, 220));
+
+    // Selection highlight
+    visuals.selection.bg_fill = Color32::from_rgb(230, 230, 230);
+    visuals.selection.stroke = Stroke::new(1.0, Color32::BLACK);
+
+    ctx.set_visuals(visuals);
 }
 
 impl eframe::App for SampleManagerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        apply_high_contrast_theme(&ctx);
         self.poll_scanner();
         self.handle_input(&ctx);
 
+        // macOS-style Top Menu Bar
+        egui::Panel::top("macos_menu_bar").show(ui, |ui| {
+            self.render_menu_bar(&ctx, ui);
+        });
+
+        // Top Search and Filter Bar
         egui::Panel::top("top_panel").show(ui, |ui| {
             self.render_top_bar(ui);
         });
 
-        egui::Panel::bottom("bottom_waveform_panel").exact_size(150.0).show(ui, |ui| {
+        // Bottom Waveform and Transport Scrubber
+        egui::Panel::bottom("bottom_waveform_panel").exact_size(152.0).show(ui, |ui| {
             self.render_bottom_panel(ui);
         });
 
-        egui::Panel::left("left_sidebar").resizable(true).default_size(240.0).show(ui, |ui| {
-            self.render_left_sidebar(ui);
-        });
+        // Left Sidebar: Libraries and Tag Taxonomy (with unique ScrollArea IDs)
+        egui::Panel::left("left_sidebar")
+            .resizable(true)
+            .default_size(280.0)
+            .min_size(220.0)
+            .max_size(480.0)
+            .show(ui, |ui| {
+                self.render_left_sidebar(ui);
+            });
 
+        // Center Virtualized Sample Grid Table
         egui::CentralPanel::default().show(ui, |ui| {
             self.render_central_table(ui);
         });
@@ -1210,8 +1577,8 @@ fn main() -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("SCOUT — Sample Library Manager")
-            .with_inner_size([1160.0, 740.0])
-            .with_min_inner_size([800.0, 500.0]),
+            .with_inner_size([1180.0, 750.0])
+            .with_min_inner_size([820.0, 520.0]),
         ..Default::default()
     };
 

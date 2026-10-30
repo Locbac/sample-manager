@@ -1,8 +1,9 @@
-//! crates/audio — audio decode and streaming preview.
+//! crates/audio — audio decode and streaming preview with resilient device negotiation and resampled playback.
 use std::fs::File;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -114,29 +115,22 @@ pub fn decode(path: &Path) -> Result<Decoded> {
     })
 }
 
+pub enum AudioBackend {
+    Cpal(cpal::Stream),
+    Virtual(Arc<AtomicBool>),
+}
+
 pub struct Player {
     pub position: Arc<AtomicUsize>, // sample index (0..samples.len())
     pub playing: Arc<AtomicBool>,
     pub looping: Arc<AtomicBool>,
     pub volume_bits: Arc<AtomicU32>,
     pub pitch_semitones: Arc<AtomicI32>,
-    _stream: cpal::Stream,
+    _backend: AudioBackend,
 }
 
 impl Player {
     pub fn play(decoded: Arc<Decoded>) -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or_else(|| anyhow!("no output device available"))?;
-
-        let channels = decoded.channels;
-        let config = cpal::StreamConfig {
-            channels,
-            sample_rate: cpal::SampleRate(decoded.sample_rate),
-            buffer_size: cpal::BufferSize::Default,
-        };
-
         let position = Arc::new(AtomicUsize::new(0));
         let playing = Arc::new(AtomicBool::new(true));
         let looping = Arc::new(AtomicBool::new(false));
@@ -148,80 +142,143 @@ impl Player {
         let loop_clone = looping.clone();
         let vol_clone = volume_bits.clone();
         let pitch_clone = pitch_semitones.clone();
-        let data = decoded.clone();
+        let data_cpal = decoded.clone();
+        let data_virtual = decoded.clone();
 
-        let num_ch = channels as usize;
-        let total_frames = data.total_frames();
+        // Attempt hardware audio stream via CPAL
+        let stream_result = (|| -> Result<cpal::Stream> {
+            let host = cpal::default_host();
+            let device = host
+                .default_output_device()
+                .ok_or_else(|| anyhow!("no output device available"))?;
 
-        let mut current_frame_frac: f64 = 0.0;
+            let default_config = device.default_output_config()?;
+            let device_channels = default_config.channels() as usize;
+            let device_sample_rate = default_config.sample_rate().0;
+            let stream_config: cpal::StreamConfig = default_config.into();
 
-        let stream = device.build_output_stream(
-            &config,
-            move |output: &mut [f32], _| {
-                if !playing_clone.load(Ordering::Relaxed) {
-                    output.fill(0.0);
-                    return;
-                }
+            let sample_channels = data_cpal.channels.max(1) as usize;
+            let sample_rate = data_cpal.sample_rate.max(1);
+            let total_frames = data_cpal.total_frames();
 
-                let is_loop = loop_clone.load(Ordering::Relaxed);
-                let vol = f32::from_bits(vol_clone.load(Ordering::Relaxed));
-                let pitch = pitch_clone.load(Ordering::Relaxed);
-                let speed = 2.0_f64.powf(pitch as f64 / 12.0);
+            // Resampling factor
+            let resample_base = (sample_rate as f64) / (device_sample_rate as f64);
+            let mut current_frame_frac: f64 = 0.0;
 
-                // Sync current_frame_frac with atomic position if user sought
-                let target_sample_pos = pos_clone.load(Ordering::Relaxed);
-                let target_frame = (target_sample_pos / num_ch.max(1)) as f64;
-                if (target_frame - current_frame_frac).abs() > 50.0 {
-                    current_frame_frac = target_frame;
-                }
+            let stream = device.build_output_stream(
+                &stream_config,
+                move |output: &mut [f32], _| {
+                    if !playing_clone.load(Ordering::Relaxed) {
+                        output.fill(0.0);
+                        return;
+                    }
 
-                if total_frames == 0 {
-                    output.fill(0.0);
-                    return;
-                }
+                    let is_loop = loop_clone.load(Ordering::Relaxed);
+                    let vol = f32::from_bits(vol_clone.load(Ordering::Relaxed));
+                    let pitch = pitch_clone.load(Ordering::Relaxed);
+                    let pitch_speed = 2.0_f64.powf(pitch as f64 / 12.0);
+                    let speed = resample_base * pitch_speed;
 
-                let mut out_idx = 0;
-                while out_idx < output.len() {
-                    let frame_floor = current_frame_frac.floor() as usize;
-                    if frame_floor >= total_frames {
-                        if is_loop {
-                            current_frame_frac = 0.0;
-                            continue;
-                        } else {
-                            // Audio finished
-                            playing_clone.store(false, Ordering::Relaxed);
-                            while out_idx < output.len() {
-                                output[out_idx] = 0.0;
-                                out_idx += 1;
+                    // Sync if user sought
+                    let target_sample_pos = pos_clone.load(Ordering::Relaxed);
+                    let target_frame = (target_sample_pos / sample_channels) as f64;
+                    if (target_frame - current_frame_frac).abs() > 100.0 {
+                        current_frame_frac = target_frame;
+                    }
+
+                    if total_frames == 0 {
+                        output.fill(0.0);
+                        return;
+                    }
+
+                    let out_frames = output.len() / device_channels.max(1);
+                    for f in 0..out_frames {
+                        let frame_floor = current_frame_frac.floor() as usize;
+                        if frame_floor >= total_frames {
+                            if is_loop {
+                                current_frame_frac = 0.0;
+                            } else {
+                                playing_clone.store(false, Ordering::Relaxed);
+                                for sample in &mut output[f * device_channels..] {
+                                    *sample = 0.0;
+                                }
+                                break;
                             }
-                            break;
                         }
+
+                        let frame_ceil = (frame_floor + 1).min(total_frames - 1);
+                        let frac = (current_frame_frac - frame_floor as f64) as f32;
+
+                        for dev_ch in 0..device_channels {
+                            let src_ch = if sample_channels == 1 {
+                                0
+                            } else {
+                                dev_ch % sample_channels
+                            };
+                            let s1 = data_cpal.samples[frame_floor * sample_channels + src_ch];
+                            let s2 = data_cpal.samples[frame_ceil * sample_channels + src_ch];
+                            let val = s1 + frac * (s2 - s1);
+                            output[f * device_channels + dev_ch] = (val * vol).clamp(-1.0, 1.0);
+                        }
+
+                        current_frame_frac += speed;
                     }
 
-                    let frame_ceil = (frame_floor + 1).min(total_frames - 1);
-                    let frac = (current_frame_frac - frame_floor as f64) as f32;
+                    pos_clone.store(
+                        (current_frame_frac as usize * sample_channels).min(data_cpal.samples.len()),
+                        Ordering::Relaxed,
+                    );
+                },
+                |err| eprintln!("audio stream error: {err}"),
+                None,
+            )?;
 
-                    for ch in 0..num_ch {
-                        if out_idx >= output.len() {
-                            break;
+            stream.play()?;
+            Ok(stream)
+        })();
+
+        let backend = match stream_result {
+            Ok(s) => AudioBackend::Cpal(s),
+            Err(e) => {
+                eprintln!("Audio hardware stream failed ({e}), using high-precision virtual playback clock");
+                let stop_signal = Arc::new(AtomicBool::new(false));
+                let stop_clone = stop_signal.clone();
+                let v_pos = position.clone();
+                let v_playing = playing.clone();
+                let v_loop = looping.clone();
+                let v_pitch = pitch_semitones.clone();
+                let v_channels = data_virtual.channels.max(1) as usize;
+                let v_sr = data_virtual.sample_rate.max(1);
+                let v_total = data_virtual.samples.len();
+
+                std::thread::spawn(move || {
+                    let tick_dur = Duration::from_millis(25);
+                    while !stop_clone.load(Ordering::Relaxed) {
+                        std::thread::sleep(tick_dur);
+                        if !v_playing.load(Ordering::Relaxed) {
+                            continue;
                         }
-                        let s1 = data.samples[frame_floor * num_ch + ch];
-                        let s2 = data.samples[frame_ceil * num_ch + ch];
-                        let val = s1 + frac * (s2 - s1);
-                        output[out_idx] = (val * vol).clamp(-1.0, 1.0);
-                        out_idx += 1;
+                        let pitch = v_pitch.load(Ordering::Relaxed);
+                        let speed = 2.0_f64.powf(pitch as f64 / 12.0);
+                        let samples_per_tick = ((v_sr as f64 * 0.025 * speed) as usize) * v_channels;
+                        let cur = v_pos.load(Ordering::Relaxed);
+                        let next = cur + samples_per_tick;
+                        if next >= v_total {
+                            if v_loop.load(Ordering::Relaxed) {
+                                v_pos.store(0, Ordering::Relaxed);
+                            } else {
+                                v_pos.store(v_total, Ordering::Relaxed);
+                                v_playing.store(false, Ordering::Relaxed);
+                            }
+                        } else {
+                            v_pos.store(next, Ordering::Relaxed);
+                        }
                     }
+                });
 
-                    current_frame_frac += speed;
-                }
-
-                pos_clone.store((current_frame_frac as usize * num_ch).min(data.samples.len()), Ordering::Relaxed);
-            },
-            |err| eprintln!("audio stream error: {err}"),
-            None,
-        )?;
-
-        stream.play()?;
+                AudioBackend::Virtual(stop_signal)
+            }
+        };
 
         Ok(Self {
             position,
@@ -229,7 +286,7 @@ impl Player {
             looping,
             volume_bits,
             pitch_semitones,
-            _stream: stream,
+            _backend: backend,
         })
     }
 
@@ -264,5 +321,34 @@ impl Player {
         let sample_idx = frame * decoded.channels as usize;
         self.position
             .store(sample_idx.min(decoded.samples.len()), Ordering::Relaxed);
+    }
+}
+
+impl Drop for Player {
+    fn drop(&mut self) {
+        if let AudioBackend::Virtual(stop) = &self._backend {
+            stop.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_virtual_player_playback() {
+        let decoded = Arc::new(Decoded {
+            samples: vec![0.0; 44100 * 2], // 1 second of stereo audio
+            channels: 2,
+            sample_rate: 44100,
+        });
+        let player = Player::play(decoded.clone()).expect("Failed to create player");
+        assert!(player.playing.load(Ordering::Relaxed));
+        std::thread::sleep(Duration::from_millis(100));
+        let pos = player.position.load(Ordering::Relaxed);
+        assert!(pos > 0, "Position should advance during playback");
+        player.pause();
+        assert!(!player.playing.load(Ordering::Relaxed));
     }
 }
