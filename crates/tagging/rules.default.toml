@@ -2,103 +2,150 @@
 # [[rules]] tag = canonical tag name; terms = exact lowercase tokens that
 # resolve to it; weight = base confidence for a direct filename hit.
 # Folder hits are scaled by [folder].weight and distance (1/depth).
-# Keep two-letter aliases conservative; noise tokens (pure digits, 1-char)
-# are filtered in code.
 version = "v0.1.0"
 
 [folder]
 enabled = true
-weight = 0.35
-max_depth = 2
+weight = 0.5
+max_depth = 3
+
+# --- 808 & sub bass ---------------------------------------------------------
+[[rules]]
+tag = "808"
+terms = ["808", "808s", "sub808", "bass808", "jerk808", "808z"]
+weight = 1.0
 
 # --- drums ------------------------------------------------------------------
 [[rules]] 
 tag = "kick"        
-terms = ["kick", "bd", "kik", "bassdrum", "bassdrm", "kickdrum"]  
+terms = ["kick", "bd", "kik", "bassdrum", "bassdrm", "kickdrum", "kicks", "kikz"]  
 weight = 1.0
+
 [[rules]] 
 tag = "snare"       
-terms = ["snare", "sd", "snr", "snares"]                            
+terms = ["snare", "sd", "snr", "snares", "snarz"]                            
 weight = 1.0
+
 [[rules]] 
 tag = "clap"        
-terms = ["clap", "clps", "claps", "clapshot"]                       
+terms = ["clap", "clps", "claps", "clapshot", "snap", "snaps"]                       
 weight = 1.0
+
 [[rules]] 
 tag = "tom"         
-terms = ["tom", "toms", "floortom", "racktom"]                      
+terms = ["tom", "toms", "floortom", "racktom", "hitom", "lotom", "midtom"]                      
 weight = 1.0
+
 [[rules]] 
 tag = "rim"         
-terms = ["rim", "rimshot", "stick", "sidestick"]                    
+terms = ["rim", "rimshot", "stick", "sidestick", "cross"]                    
 weight = 1.0
+
 [[rules]] 
-tag = "hat_closed"  
-terms = ["ch", "hh", "hhc", "closedhat", "hats", "hat"]            
-weight = 0.9
+tag = "hihat"  
+terms = ["ch", "hh", "hhc", "closedhat", "hats", "hat", "hihat", "hihats", "closedhh"]            
+weight = 0.95
+
 [[rules]] 
-tag = "hat_open"    
-terms = ["oh", "ohh", "openhat", "openhats", "pedalhat"]            
+tag = "openhat"    
+terms = ["oh", "ohh", "openhat", "openhats", "pedalhat", "openhh"]            
 weight = 1.0
+
 [[rules]] 
 tag = "crash"       
-terms = ["crash", "crsh"]                                           
+terms = ["crash", "crsh", "crashes"]                                           
 weight = 1.0
+
 [[rules]] 
 tag = "ride"        
-terms = ["ride", "rides", "ridecym"]                                
+terms = ["ride", "rides", "ridecym", "ridecymbal"]                                
 weight = 1.0
+
 [[rules]] 
 tag = "cymbal"      
-terms = ["cym", "cymbal", "splash", "china"]                        
+terms = ["cym", "cymbal", "cymbals", "splash", "china"]                        
 weight = 0.9
+
 [[rules]] 
 tag = "shaker"      
-terms = ["shaker", "shk", "maraca", "cabasa"]                       
+terms = ["shaker", "shk", "maraca", "cabasa", "shakers"]                       
 weight = 1.0
+
 [[rules]] 
 tag = "percussion"  
-terms = ["perc", "bongo", "conga", "cowbell", "tamb", "tambourine", "woodblock", "agogo"]
+terms = ["perc", "percs", "bongo", "bongos", "conga", "congas", "cowbell", "tamb", "tambourine", "woodblock", "agogo", "guiro", "clave", "claves"]
 weight = 1.0
 
-# --- kit families -------------------------------------------------------------
+# --- kit families & instruments ---------------------------------------------
 [[rules]] 
 tag = "bass"        
-terms = ["bass", "sub", "reese", "wobble"]                          
+terms = ["bass", "sub", "reese", "wobble", "synthbass", "subbass", "pluckedbass"]                          
 weight = 0.9
+
 [[rules]] 
 tag = "synth"       
-terms = ["synth", "lead", "plk", "pluck", "keys"]                   
+terms = ["synth", "lead", "plk", "pluck", "keys", "piano", "organ", "rhodes", "keyboard", "arp", "arpeggio"]                   
 weight = 0.9
+
 [[rules]] 
 tag = "pad"         
-terms = ["pad", "pads", "atmo", "atmosphere"]                       
+terms = ["pad", "pads", "atmo", "atmosphere", "drone", "ambientpad"]                       
 weight = 0.9
+
 [[rules]] 
 tag = "strings"     
-terms = ["strings", "str", "violin", "cello", "orchestra"]          
+terms = ["strings", "str", "violin", "cello", "orchestra", "string"]          
 weight = 0.9
+
 [[rules]] 
 tag = "vocal"       
-terms = ["vox", "vocal", "vocals", "chant", "adlib"]                
+terms = ["vox", "vocal", "vocals", "chant", "adlib", "acapella", "hook", "shout", "phrase"]                
 weight = 0.9
 
-# --- loops & fx ---------------------------------------------------------------
+# --- loops & one-shots ------------------------------------------------------
 [[rules]] 
 tag = "loop"        
-terms = ["loop", "loops", "drumloop", "toploop", "fill"]            
-weight = 0.8
+terms = ["loop", "loops", "drumloop", "toploop", "melodyloop", "bassloop", "fill", "groove"]            
+weight = 0.9
+
+[[rules]] 
+tag = "one-shot"        
+terms = ["shot", "oneshot", "hit", "stab", "single"]            
+weight = 0.85
+
+# --- fx & textures ----------------------------------------------------------
 [[rules]] 
 tag = "fx"          
-terms = ["fx", "sfx", "riser", "uplifter", "downlifter", "impact", "sweep", "whoosh", "drop"]
+terms = ["fx", "sfx", "riser", "uplifter", "downlifter", "impact", "sweep", "whoosh", "drop", "glitch", "laser", "beep", "siren"]
 weight = 0.9
+
 [[rules]] 
 tag = "texture"     
-terms = ["texture", "noise", "vinyl", "crackle", "field"]           
+terms = ["texture", "noise", "vinyl", "crackle", "field", "foley", "ambient", "tape"]           
+weight = 0.85
+
+# --- genres -----------------------------------------------------------------
+[[rules]]
+tag = "trap"
+terms = ["trap", "drill", "jerk", "pluggnb", "plugg", "rage"]
 weight = 0.8
 
-# NOTE things deliberately absent:
-#   "808" (pure digit => filtered as noise; too ambiguous)
-#   "hat" for "phat" (exact-token match prevents it; no substring matching)
-#   genre names with high collision risk — add them in YOUR user rules with
-#   lower weights and check false positives on your own corpus.
+[[rules]]
+tag = "hiphop"
+terms = ["hiphop", "boom", "boombap", "rap", "lofi"]
+weight = 0.8
+
+[[rules]]
+tag = "house"
+terms = ["house", "techhouse", "deephouse", "disco", "garage"]
+weight = 0.8
+
+[[rules]]
+tag = "techno"
+terms = ["techno", "minimal", "industrial", "trance", "ebm"]
+weight = 0.8
+
+[[rules]]
+tag = "dnb"
+terms = ["dnb", "drumandbass", "jungle", "breakbeat", "breaks"]
+weight = 0.8

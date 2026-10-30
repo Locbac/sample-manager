@@ -54,7 +54,20 @@ pub struct Engine {
     term_index: HashMap<String, Vec<usize>>, // term -> rule indices
 }
 
+pub fn default_engine() -> &'static Engine {
+    Engine::default_engine()
+}
+
 impl Engine {
+    pub fn default_rules() -> Self {
+        Self::from_toml(include_str!("../rules.default.toml")).expect("valid default rules.default.toml")
+    }
+
+    pub fn default_engine() -> &'static Engine {
+        static ENGINE: std::sync::OnceLock<Engine> = std::sync::OnceLock::new();
+        ENGINE.get_or_init(Self::default_rules)
+    }
+
     pub fn from_toml(text: &str) -> Result<Self, toml::de::Error> {
         let rs: RuleSet = toml::from_str(text)?;
         let mut term_index: HashMap<String, Vec<usize>> = HashMap::new();
@@ -117,9 +130,12 @@ impl Engine {
     }
 }
 
-/// Guards: pure numbers (01, 808, 124bpm) are legal tokens but too weak to
-/// tag on their own; single letters likewise.
+/// Guards: single letters or generic pure numbers are noise, EXCEPT iconic music gear
+/// numbers like '808', '909', '303', '707'.
 fn is_noise(tok: &str) -> bool {
+    if tok == "808" || tok == "909" || tok == "303" || tok == "707" {
+        return false;
+    }
     tok.len() < 2 || tok.chars().all(|c| c.is_ascii_digit())
 }
 

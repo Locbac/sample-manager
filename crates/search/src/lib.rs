@@ -41,7 +41,7 @@ impl Default for Sort {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileRow {
     pub id: i64,
     pub rel_path: String,
@@ -52,6 +52,8 @@ pub struct FileRow {
     pub size: i64,
     pub favorite: bool,
     pub total: i64, // window count, valid on every row
+    pub tags: Vec<String>,
+    pub tags_display: String,
 }
 
 /// FTS5: user text -> quoted AND-joined prefix terms: 'open hat' => "open"* "hat"*
@@ -154,7 +156,13 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
     let sql = format!(
         "SELECT f.id, f.rel_path, f.name, f.ext, f.duration_ms, f.bpm, f.size,
                 EXISTS(SELECT 1 FROM favorites fv WHERE fv.file_id = f.id) AS fav,
-                count(*) OVER () AS total
+                count(*) OVER () AS total,
+                (
+                    SELECT GROUP_CONCAT(t.name, ', ')
+                    FROM file_tags ft
+                    JOIN tags t ON t.id = ft.tag_id
+                    WHERE ft.file_id = f.id AND ft.state != 'dismissed'
+                ) AS tag_list
          FROM files f {fts}
          WHERE {w}
          ORDER BY {order}
@@ -170,6 +178,18 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
     let mut stmt = c.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params), |r| {
+            let tags_raw: Option<String> = r.get(9)?;
+            let tags: Vec<String> = tags_raw
+                .as_deref()
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let tags_display = tags_raw.unwrap_or_default();
+
             Ok(FileRow {
                 id: r.get(0)?,
                 rel_path: r.get(1)?,
@@ -180,6 +200,8 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
                 size: r.get(6)?,
                 favorite: r.get::<_, i64>(7)? == 1,
                 total: r.get(8)?,
+                tags,
+                tags_display,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;

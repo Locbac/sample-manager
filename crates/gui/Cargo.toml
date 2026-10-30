@@ -24,3 +24,6 @@ scout-tagging = { path = "../tagging" }
 scout-audio = { path = "../audio" }
 scout-embedded = { path = "../embedded" }
 scout-import-adsr = { path = "../import-adsr" }
+drag = "2.1.1"
+raw-window-handle = "0.6"
+rfd = "0.15"

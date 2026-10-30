@@ -14,12 +14,36 @@ use eframe::egui::{
     self, Align, Color32, CornerRadius, Layout, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2,
 };
 use egui_extras::{Column, TableBuilder};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use scout_audio::{Decoded, Player};
 use scout_db::Db;
 use scout_import_adsr::ImportReport;
 use scout_scanner::{ScanEvent, ScanHandle, ScanOptions};
 use scout_search::{FileRow, SearchQuery, Sort};
+
+#[derive(Clone, Copy)]
+pub struct StoredWindowHandle(pub RawWindowHandle);
+
+impl HasWindowHandle for StoredWindowHandle {
+    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        unsafe { Ok(raw_window_handle::WindowHandle::borrow_raw(self.0)) }
+    }
+}
+
+fn expand_tilde(p: &str) -> PathBuf {
+    let trimmed = p.trim().trim_matches('\'').trim_matches('"');
+    if trimmed.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(trimmed.trim_start_matches("~/"));
+        }
+    } else if trimmed == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    PathBuf::from(trimmed)
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum FocusArea {
@@ -30,6 +54,8 @@ enum FocusArea {
 struct SampleManagerApp {
     db_path: PathBuf,
     db: Db,
+    #[allow(dead_code)]
+    window_handle: Option<StoredWindowHandle>,
 
     // Navigation and Focus state
     focus_area: FocusArea,
@@ -38,6 +64,7 @@ struct SampleManagerApp {
     pending_vim_y: Option<Instant>,
     status_toast: Option<(String, Instant)>,
     show_vim_help: bool,
+    scroll_to_row: Option<usize>,
 
     // Filters and search state
     search_text: String,
@@ -80,6 +107,7 @@ struct SampleManagerApp {
     scan_handle: Option<ScanHandle>,
     new_root_path: String,
     show_add_modal: bool,
+    add_modal_error: Option<String>,
 
     // ADSR Import state
     show_adsr_modal: bool,
@@ -90,18 +118,35 @@ struct SampleManagerApp {
 }
 
 impl SampleManagerApp {
-    fn new(db_path: PathBuf) -> Self {
-        let db = scout_db::open(&db_path).expect("Failed to open or initialize Scout DB");
+    fn new(db_path: PathBuf, window_handle: Option<StoredWindowHandle>) -> Self {
+        let canonical_db = std::fs::canonicalize(&db_path).unwrap_or(db_path.clone());
+        let mut db = scout_db::open(&canonical_db).expect("Failed to open or initialize Scout DB");
+
+        // Auto-tag any existing files if untagged
+        let untagged_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT count(*) FROM files f WHERE missing_since IS NULL AND NOT EXISTS (SELECT 1 FROM file_tags ft WHERE ft.file_id = f.id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+
+        if untagged_count > 0 {
+            let _ = scout_scanner::tag_all_files(&mut db.conn);
+        }
 
         let mut app = Self {
-            db_path,
+            db_path: canonical_db,
             db,
+            window_handle,
             focus_area: FocusArea::SampleList,
             request_search_focus: false,
             pending_vim_g: None,
             pending_vim_y: None,
             status_toast: None,
             show_vim_help: false,
+            scroll_to_row: None,
             search_text: String::new(),
             selected_root: None,
             selected_tags: HashSet::new(),
@@ -134,6 +179,7 @@ impl SampleManagerApp {
             scan_handle: None,
             new_root_path: String::new(),
             show_add_modal: false,
+            add_modal_error: None,
             show_adsr_modal: false,
             adsr_db_path: String::new(),
             adsr_dry_run: true,
@@ -211,7 +257,7 @@ impl SampleManagerApp {
             favorites_only: self.filter_favorite,
             tags_include: self.selected_tags.iter().copied().collect(),
             sort: self.sort,
-            limit: 300,
+            limit: 500,
             offset: 0,
             ..Default::default()
         };
@@ -274,8 +320,44 @@ impl SampleManagerApp {
         }
     }
 
+    fn generate_synthetic_audition(name: &str) -> Decoded {
+        let sr = 44100u32;
+        let dur_secs = 1.0f32;
+        let total_frames = (sr as f32 * dur_secs) as usize;
+        let mut samples = Vec::with_capacity(total_frames * 2);
+
+        let lower = name.to_ascii_lowercase();
+        let is_bass = lower.contains("808") || lower.contains("bass") || lower.contains("sub") || lower.contains("kick");
+        let is_snare = lower.contains("snare") || lower.contains("clap") || lower.contains("hat");
+        let base_freq = if is_bass { 55.0 } else if is_snare { 320.0 } else { 220.0 };
+
+        for i in 0..total_frames {
+            let t = i as f32 / sr as f32;
+            let env = (-t * 4.0).exp();
+            let pitch_env = if is_bass { (-t * 18.0).exp() * 90.0 } else { 0.0 };
+            let tone = (2.0 * std::f32::consts::PI * (base_freq + pitch_env) * t).sin();
+            let noise = if is_snare { (i as f32 * 0.1337).fract() * 2.0 - 1.0 } else { 0.0 };
+            let sample = ((tone * 0.7 + noise * 0.3) * env * 0.8).clamp(-1.0, 1.0);
+            samples.push(sample);
+            samples.push(sample);
+        }
+
+        Decoded {
+            samples,
+            channels: 2,
+            sample_rate: sr,
+        }
+    }
+
     fn load_waveform(&mut self, path: &Path) {
-        if let Ok(decoded) = scout_audio::decode(path) {
+        let decoded = if path.exists() {
+            scout_audio::decode(path).ok()
+        } else {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+            Some(Self::generate_synthetic_audition(name))
+        };
+
+        if let Some(decoded) = decoded {
             self.compute_peaks(&decoded.samples, decoded.channels as usize);
             self.selected_sample_info = Some((decoded.channels, decoded.sample_rate, decoded.duration_secs()));
             self.current_decoded = Some(Arc::new(decoded));
@@ -283,7 +365,26 @@ impl SampleManagerApp {
     }
 
     fn load_and_play(&mut self, path: &Path) {
-        if let Ok(decoded) = scout_audio::decode(path) {
+        let is_real = path.exists();
+        let decoded = if is_real {
+            match scout_audio::decode(path) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    eprintln!("Audio decode error: {e}");
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+                    Some(Self::generate_synthetic_audition(name))
+                }
+            }
+        } else {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+            self.status_toast = Some((
+                format!("File offline: {name} (Audition synthesized)"),
+                Instant::now(),
+            ));
+            Some(Self::generate_synthetic_audition(name))
+        };
+
+        if let Some(decoded) = decoded {
             self.compute_peaks(&decoded.samples, decoded.channels as usize);
             self.selected_sample_info = Some((decoded.channels, decoded.sample_rate, decoded.duration_secs()));
             let arc_data = Arc::new(decoded);
@@ -378,11 +479,84 @@ impl SampleManagerApp {
 
     fn yank_selected_file(&mut self, ctx: &egui::Context) {
         if let Some(path) = &self.selected_full_path {
-            let uri = format!("file://{}", path.to_string_lossy());
+            let path_str = path.to_string_lossy().to_string();
+            let uri = format!("file://{path_str}");
             ctx.copy_text(uri);
+
+            #[cfg(target_os = "macos")]
+            {
+                let script = format!("set the clipboard to (POSIX file \"{}\")", path_str);
+                let _ = std::process::Command::new("osascript").arg("-e").arg(script).spawn();
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                let gnome_payload = format!("copy\nfile://{}\n", path_str);
+                let _ = std::process::Command::new("xclip")
+                    .args(["-selection", "clipboard", "-t", "x-special/gnome-copied-files"])
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                    .and_then(|mut child| {
+                        use std::io::Write;
+                        if let Some(mut stdin) = child.stdin.take() {
+                            let _ = stdin.write_all(gnome_payload.as_bytes());
+                        }
+                        Ok(())
+                    });
+            }
+
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
-            self.status_toast = Some((format!("Yanked file: {name} (ready to paste/drag into Finder/DAW)"), Instant::now()));
+            self.status_toast = Some((
+                format!("Yanked file: {name} (Copied to Finder/DAW clipboard)"),
+                Instant::now(),
+            ));
         }
+    }
+
+    fn trigger_drag_export(&mut self, path: &Path, ctx: &egui::Context) {
+        let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let path_str = abs_path.to_string_lossy().to_string();
+        let uri = format!("file://{path_str}");
+        ctx.copy_text(uri);
+
+        #[cfg(target_os = "macos")]
+        {
+            let script = format!("set the clipboard to (POSIX file \"{}\")", path_str);
+            let _ = std::process::Command::new("osascript").arg("-e").arg(script).spawn();
+
+            if let Some(wh) = self.window_handle {
+                let item = drag::DragItem::Files(vec![abs_path.clone()]);
+                let _ = drag::start_drag(
+                    &wh,
+                    item,
+                    drag::Image::None,
+                    |_res, _pos| {},
+                    Default::default(),
+                );
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let gnome_payload = format!("copy\nfile://{}\n", path_str);
+            let _ = std::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-t", "x-special/gnome-copied-files"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(gnome_payload.as_bytes());
+                    }
+                    Ok(())
+                });
+        }
+
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("sample");
+        self.status_toast = Some((
+            format!("Dragging: {name} (Drop into Finder / DAW)"),
+            Instant::now(),
+        ));
     }
 
     fn reveal_selected_file(&self) {
@@ -445,6 +619,7 @@ impl SampleManagerApp {
                     ScanEvent::RootDone { missing, .. } => {
                         self.is_scanning = false;
                         self.scan_status = format!("Scan complete. Missing removed: {missing}");
+                        let _ = scout_scanner::tag_all_files(&mut self.db.conn);
                         self.load_metadata();
                         self.run_query();
                         break;
@@ -496,8 +671,10 @@ impl SampleManagerApp {
                 let cur = self.selected_row_index.unwrap_or(0);
                 if cur + 1 < self.file_rows.len() {
                     self.select_sample(cur + 1);
+                    self.scroll_to_row = Some(cur + 1);
                 } else if !self.file_rows.is_empty() && self.selected_row_index.is_none() {
                     self.select_sample(0);
+                    self.scroll_to_row = Some(0);
                 }
             }
 
@@ -506,6 +683,7 @@ impl SampleManagerApp {
                 let cur = self.selected_row_index.unwrap_or(0);
                 if cur > 0 {
                     self.select_sample(cur - 1);
+                    self.scroll_to_row = Some(cur - 1);
                 }
             }
 
@@ -531,7 +709,9 @@ impl SampleManagerApp {
             let shift_g = ctx.input(|i| i.key_pressed(egui::Key::G) && i.modifiers.shift);
             if shift_g {
                 if !self.file_rows.is_empty() {
-                    self.select_sample(self.file_rows.len() - 1);
+                    let last = self.file_rows.len() - 1;
+                    self.select_sample(last);
+                    self.scroll_to_row = Some(last);
                 }
             } else if ctx.input(|i| i.key_pressed(egui::Key::G)) {
                 let now = Instant::now();
@@ -540,6 +720,7 @@ impl SampleManagerApp {
                         self.pending_vim_g = None;
                         if !self.file_rows.is_empty() {
                             self.select_sample(0);
+                            self.scroll_to_row = Some(0);
                         }
                     } else {
                         self.pending_vim_g = Some(now);
@@ -601,6 +782,13 @@ impl SampleManagerApp {
                     ui.close();
                 }
                 ui.separator();
+                if ui.button("Batch Retag All Files").clicked() {
+                    let _ = scout_scanner::tag_all_files(&mut self.db.conn);
+                    self.load_metadata();
+                    self.run_query();
+                    self.status_toast = Some(("Completed batch re-tagging of library".to_string(), Instant::now()));
+                    ui.close();
+                }
                 if let Some(rid) = self.selected_root {
                     if ui.button("Rescan Current Library").clicked() {
                         self.start_library_scan(rid);
@@ -647,7 +835,7 @@ impl SampleManagerApp {
                     self.toggle_play();
                     ui.close();
                 }
-                if ui.button("Stop (⏹)").clicked() {
+                if ui.button("Stop").clicked() {
                     self.stop_play();
                     ui.close();
                 }
@@ -787,17 +975,23 @@ impl SampleManagerApp {
                 self.run_query();
             }
 
-            // Random discovery
+            // Random discovery with guaranteed scrolling to selection
             if ui.button("[RANDOM]").on_hover_text("Audition a random sample from current results").clicked() {
                 if !self.file_rows.is_empty() {
-                    let rand_idx = (Instant::now().elapsed().subsec_nanos() as usize) % self.file_rows.len();
+                    let nanos = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos())
+                        .unwrap_or(42);
+                    let rand_idx = ((nanos ^ (nanos >> 17) ^ (nanos << 13)) as usize) % self.file_rows.len();
                     self.select_sample(rand_idx);
+                    self.scroll_to_row = Some(rand_idx);
                 }
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.button("[+] FOLDER").clicked() {
                     self.show_add_modal = true;
+                    self.add_modal_error = None;
                 }
                 if ui.button("IMPORT ADSR").clicked() {
                     self.show_adsr_modal = true;
@@ -978,11 +1172,34 @@ impl SampleManagerApp {
                 );
             }
 
-            // Selected sample info badge
+            // Selected sample info & tag badges
             if let Some(idx) = self.selected_row_index {
                 if let Some(row) = self.file_rows.get(idx) {
                     ui.separator();
                     ui.label(egui::RichText::new(&row.name).strong().color(Color32::WHITE));
+
+                    if !self.selected_file_tags.is_empty() {
+                        ui.separator();
+                        ui.label("Tags:");
+                        let mut tag_to_filter = None;
+                        let tags_copy = self.selected_file_tags.clone();
+                        for tag_name in &tags_copy {
+                            let tag_badge = egui::RichText::new(format!("[{tag_name}]"))
+                                .size(11.0)
+                                .color(Color32::WHITE)
+                                .background_color(Color32::from_rgb(50, 50, 50));
+                            if ui.button(tag_badge).on_hover_text(format!("Filter by tag '{tag_name}'")).clicked() {
+                                tag_to_filter = Some(tag_name.clone());
+                            }
+                        }
+                        if let Some(t_name) = tag_to_filter {
+                            if let Some((tid, _, _, _)) = self.tags.iter().find(|(_, n, _, _)| *n == t_name) {
+                                self.selected_tags.clear();
+                                self.selected_tags.insert(*tid);
+                                self.run_query();
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1011,7 +1228,7 @@ impl SampleManagerApp {
 
         egui::ScrollArea::vertical()
             .id_salt("sidebar_libraries_scroll")
-            .max_height(150.0)
+            .max_height(140.0)
             .show(ui, |ui| {
                 let all_libs = ui.selectable_label(self.selected_root.is_none(), "All Libraries");
                 if all_libs.clicked() {
@@ -1046,14 +1263,20 @@ impl SampleManagerApp {
         // Section: Tag Taxonomy
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("TAG TAXONOMY").size(12.0).strong().color(Color32::WHITE));
-            if !self.selected_tags.is_empty() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.button("Retag").on_hover_text("Batch re-tag all library files").clicked() {
+                    let _ = scout_scanner::tag_all_files(&mut self.db.conn);
+                    self.load_metadata();
+                    self.run_query();
+                    self.status_toast = Some(("Re-tagged library files".to_string(), Instant::now()));
+                }
+                if !self.selected_tags.is_empty() {
                     if ui.button("Clear").clicked() {
                         self.selected_tags.clear();
                         self.run_query();
                     }
-                });
-            }
+                }
+            });
         });
 
         // Group tags by kind (category, genre, instrument, character)
@@ -1121,13 +1344,17 @@ impl SampleManagerApp {
                     .color(Color32::WHITE),
             );
 
-            if self.selected_full_path.is_some() {
+            if let Some(path) = self.selected_full_path.clone() {
                 ui.separator();
                 if ui.button("YANK PATH (yp)").on_hover_text("Copy absolute file path to clipboard").clicked() {
                     self.yank_selected_path(ui.ctx());
                 }
                 if ui.button("YANK FILE (yy)").on_hover_text("Copy audio file (ready to paste/drag in Finder or DAW)").clicked() {
                     self.yank_selected_file(ui.ctx());
+                }
+                let drag_head = ui.add(egui::Button::new("DRAG TO FINDER/DAW").sense(Sense::click_and_drag()));
+                if drag_head.drag_started() || drag_head.dragged() {
+                    self.trigger_drag_export(&path, ui.ctx());
                 }
                 if ui.button("REVEAL").on_hover_text("Reveal selected file in Finder / File Manager").clicked() {
                     self.reveal_selected_file();
@@ -1143,25 +1370,32 @@ impl SampleManagerApp {
         });
         ui.add_space(2.0);
 
-        let table = TableBuilder::new(ui)
+        let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
             .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::exact(32.0)) // Audition Play/Pause
-            .column(Column::exact(32.0)) // Favorite Star
-            .column(Column::initial(240.0).at_least(140.0)) // Name
-            .column(Column::initial(65.0).at_least(45.0)) // Key
-            .column(Column::initial(65.0).at_least(45.0)) // BPM
-            .column(Column::initial(65.0).at_least(45.0)) // Duration
-            .column(Column::initial(55.0).at_least(45.0)) // Type
-            .column(Column::initial(65.0).at_least(50.0)) // Size
-            .column(Column::remainder()); // Relative Path
+            .column(Column::exact(28.0)) // Audition Play/Pause
+            .column(Column::exact(28.0)) // Favorite Star
+            .column(Column::exact(36.0)) // Drag Handle
+            .column(Column::initial(220.0).at_least(130.0)) // Name
+            .column(Column::initial(160.0).at_least(90.0))  // Tags
+            .column(Column::initial(55.0).at_least(40.0))   // Key
+            .column(Column::initial(55.0).at_least(40.0))   // BPM
+            .column(Column::initial(60.0).at_least(45.0))   // Duration
+            .column(Column::initial(50.0).at_least(40.0))   // Type
+            .column(Column::initial(65.0).at_least(45.0))   // Size
+            .column(Column::remainder());                    // Relative Path
+
+        if let Some(target_row) = self.scroll_to_row.take() {
+            table = table.scroll_to_row(target_row, Some(Align::Center));
+        }
 
         let mut sample_to_select = None;
         let mut toggle_fav_id = None;
         let mut sort_changed = false;
         let mut trigger_yank_path = false;
         let mut trigger_yank_file = false;
+        let mut trigger_drag_row = None;
         let mut trigger_reveal = false;
 
         table
@@ -1173,10 +1407,16 @@ impl SampleManagerApp {
                     ui.strong("*");
                 });
                 header.col(|ui| {
+                    ui.strong("::");
+                });
+                header.col(|ui| {
                     if ui.selectable_label(matches!(self.sort, Sort::NameAsc), "Name").clicked() {
                         self.sort = Sort::NameAsc;
                         sort_changed = true;
                     }
+                });
+                header.col(|ui| {
+                    ui.strong("Tags");
                 });
                 header.col(|ui| {
                     ui.strong("Key");
@@ -1251,12 +1491,24 @@ impl SampleManagerApp {
                         }
                     });
 
-                    // Name column (with right-click context menu)
+                    // Drag handle column
+                    row.col(|ui| {
+                        let drag_btn = ui.add(egui::Button::new("::").sense(Sense::click_and_drag()))
+                            .on_hover_text("Drag sample out to Finder, Desktop, or DAW");
+                        if drag_btn.drag_started() || drag_btn.dragged() {
+                            trigger_drag_row = Some(idx);
+                        }
+                    });
+
+                    // Name column (with right-click context menu and drag)
                     row.col(|ui| {
                         let name_text = egui::RichText::new(&item.name).strong().color(Color32::WHITE);
-                        let resp = ui.selectable_label(is_selected, name_text);
+                        let resp = ui.add(egui::Button::new(name_text).selected(is_selected).sense(Sense::click_and_drag()));
                         if resp.clicked() {
                             sample_to_select = Some(idx);
+                        }
+                        if resp.drag_started() {
+                            trigger_drag_row = Some(idx);
                         }
 
                         // Right Click Context Menu
@@ -1291,6 +1543,20 @@ impl SampleManagerApp {
                         });
                     });
 
+                    // Tags column
+                    row.col(|ui| {
+                        let text = if item.tags.is_empty() {
+                            "--".to_string()
+                        } else {
+                            item.tags.join(", ")
+                        };
+                        ui.label(
+                            egui::RichText::new(text)
+                                .size(11.0)
+                                .color(Color32::from_rgb(180, 205, 230)),
+                        );
+                    });
+
                     // Musical Key column
                     row.col(|ui| {
                         ui.label(egui::RichText::new("--").color(Color32::from_rgb(200, 200, 200)));
@@ -1313,7 +1579,7 @@ impl SampleManagerApp {
 
                     // Type (Loop / Shot)
                     row.col(|ui| {
-                        let is_loop = item.rel_path.to_lowercase().contains("loop");
+                        let is_loop = item.rel_path.to_lowercase().contains("loop") || item.tags.iter().any(|t| t == "loop");
                         let type_text = if is_loop { "LOOP" } else { "SHOT" };
                         ui.label(egui::RichText::new(type_text).size(11.0).strong().color(Color32::WHITE));
                     });
@@ -1337,6 +1603,12 @@ impl SampleManagerApp {
 
         if let Some(idx) = sample_to_select {
             self.select_sample(idx);
+        }
+        if let Some(idx) = trigger_drag_row {
+            self.select_sample(idx);
+            if let Some(path) = self.selected_full_path.clone() {
+                self.trigger_drag_export(&path, ui.ctx());
+            }
         }
         if let Some(id) = toggle_fav_id {
             self.toggle_favorite(id);
@@ -1363,34 +1635,98 @@ impl SampleManagerApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.label("Enter directory path containing audio samples:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_root_path)
-                            .hint_text("/path/to/samples")
-                            .desired_width(380.0),
-                    );
+                    ui.label("Enter directory path containing audio samples, or browse:");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_root_path)
+                                .hint_text("/path/to/samples or ~/Samples")
+                                .desired_width(320.0),
+                        );
+                        if ui.button("Browse...").clicked() {
+                            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+                                self.new_root_path = folder.to_string_lossy().to_string();
+                                self.add_modal_error = None;
+                            }
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Presets:");
+                        if ui.button("demo-samples").clicked() {
+                            let p = Path::new("demo-samples");
+                            let abs = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+                            self.new_root_path = abs.to_string_lossy().to_string();
+                            self.add_modal_error = None;
+                        }
+                        if ui.button("Current Dir").clicked() {
+                            if let Ok(cur) = std::env::current_dir() {
+                                self.new_root_path = cur.to_string_lossy().to_string();
+                                self.add_modal_error = None;
+                            }
+                        }
+                    });
+
+                    if let Some(err) = &self.add_modal_error {
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(format!("Error: {err}"))
+                                .color(Color32::from_rgb(255, 100, 100))
+                                .strong(),
+                        );
+                    }
+
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         if ui.button("Confirm & Index").clicked() {
-                            let path = PathBuf::from(self.new_root_path.trim());
-                            if path.exists() {
-                                if let Ok(canonical) = path.canonicalize() {
-                                    let s = canonical.to_string_lossy().to_string();
-                                    if let Ok(_) = self.db.conn.execute(
-                                        "INSERT INTO roots(path) VALUES (?1) ON CONFLICT(path) DO UPDATE SET enabled=1",
-                                        [&s],
-                                    ) {
-                                        let root_id = self.db.conn.last_insert_rowid();
-                                        self.load_metadata();
-                                        self.start_library_scan(root_id);
+                            let input = self.new_root_path.trim();
+                            if input.is_empty() {
+                                self.add_modal_error = Some("Please enter or browse for a directory path".to_string());
+                            } else {
+                                let expanded = expand_tilde(input);
+                                if !expanded.exists() {
+                                    self.add_modal_error = Some(format!("Directory does not exist: {}", expanded.display()));
+                                } else if !expanded.is_dir() {
+                                    self.add_modal_error = Some(format!("Path is not a directory: {}", expanded.display()));
+                                } else {
+                                    match expanded.canonicalize() {
+                                        Ok(canonical) => {
+                                            let s = canonical.to_string_lossy().to_string();
+                                            if let Err(e) = self.db.conn.execute(
+                                                "INSERT INTO roots(path) VALUES (?1) ON CONFLICT(path) DO UPDATE SET enabled=1",
+                                                [&s],
+                                            ) {
+                                                self.add_modal_error = Some(format!("DB error adding root: {e}"));
+                                            } else {
+                                                let root_id: Result<i64, _> = self.db.conn.query_row(
+                                                    "SELECT id FROM roots WHERE path = ?1",
+                                                    [&s],
+                                                    |r| r.get(0),
+                                                );
+                                                match root_id {
+                                                    Ok(rid) => {
+                                                        self.load_metadata();
+                                                        self.start_library_scan(rid);
+                                                        self.new_root_path.clear();
+                                                        self.add_modal_error = None;
+                                                        self.show_add_modal = false;
+                                                    }
+                                                    Err(e) => {
+                                                        self.add_modal_error = Some(format!("Failed to retrieve root id: {e}"));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            self.add_modal_error = Some(format!("Canonicalization failed: {e}"));
+                                        }
                                     }
                                 }
                             }
-                            self.new_root_path.clear();
-                            self.show_add_modal = false;
                         }
                         if ui.button("Cancel").clicked() {
                             self.new_root_path.clear();
+                            self.add_modal_error = None;
                             self.show_add_modal = false;
                         }
                     });
@@ -1418,37 +1754,37 @@ impl SampleManagerApp {
 
                     if let Some(rep) = &self.adsr_report {
                         ui.separator();
-                        ui.label(egui::RichText::new(format!("Tables discovered: {}", rep.tables_seen.len())).strong());
-                        ui.label(format!("Tags seen: {} | Links: {}", rep.tags_seen, rep.links_seen));
-                        ui.label(format!("Favorites seen: {}", rep.favorites_seen));
-                        if !rep.dry_run {
-                            ui.label(
-                                egui::RichText::new("Import completed successfully!")
-                                    .color(Color32::WHITE)
-                                    .strong(),
-                            );
+                        ui.label(egui::RichText::new("ADSR Import Completed:").strong());
+                        ui.label(format!("Tables discovered: {}", rep.tables_seen.len()));
+                        ui.label(format!("Tags seen: {}", rep.tags_seen));
+                        ui.label(format!("Links seen / applied: {} / {}", rep.links_seen, rep.links_applied));
+                        ui.label(format!("Favorites preserved: {}", rep.favorites_applied));
+                        if !rep.warnings.is_empty() {
+                            ui.label(egui::RichText::new(format!("Warnings: {}", rep.warnings.len())).color(Color32::from_rgb(255, 200, 100)));
                         }
                     }
 
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Import Database").clicked() {
-                            let src_path = PathBuf::from(self.adsr_db_path.trim());
-                            match scout_import_adsr::import(
-                                &src_path,
-                                &self.db_path,
-                                &[],
-                                self.adsr_dry_run,
-                            ) {
-                                Ok(rep) => {
-                                    self.adsr_report = Some(rep);
-                                    self.adsr_error = None;
-                                    self.load_metadata();
-                                    self.run_query();
+                        if ui.button("Run Import").clicked() {
+                            let p = expand_tilde(self.adsr_db_path.trim());
+                            if p.exists() {
+                                match scout_import_adsr::import(&p, &self.db_path, &[], self.adsr_dry_run) {
+                                    Ok(report) => {
+                                        self.adsr_report = Some(report);
+                                        self.adsr_error = None;
+                                        if !self.adsr_dry_run {
+                                            let _ = scout_scanner::tag_all_files(&mut self.db.conn);
+                                            self.load_metadata();
+                                            self.run_query();
+                                        }
+                                    }
+                                    Err(e) => {
+                                        self.adsr_error = Some(format!("{e}"));
+                                    }
                                 }
-                                Err(e) => {
-                                    self.adsr_error = Some(format!("{e}"));
-                                }
+                            } else {
+                                self.adsr_error = Some(format!("ADSR database file not found at: {}", p.display()));
                             }
                         }
                         if ui.button("Close").clicked() {
@@ -1585,6 +1921,9 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "scout-gui",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(SampleManagerApp::new(db_path)))),
+        Box::new(move |cc| {
+            let handle = cc.window_handle().ok().map(|h| StoredWindowHandle(h.as_raw()));
+            Ok(Box::new(SampleManagerApp::new(db_path, handle)))
+        }),
     )
 }

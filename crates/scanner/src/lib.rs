@@ -111,11 +111,26 @@ fn run(
             return Ok(());
         }
         let txb = c.transaction()?;
+        let engine = scout_tagging::default_engine();
         for (rel, name, ext, size, mtime) in pending.drain(..) {
             let tokens = scout_tagging::tokenize(&name).join(" ");
             let (id, was_changed) = scout_db::upsert_seen_file(
                 &txb, root_id, &rel, &name, &tokens, &ext, size, mtime, run_id,
             )?;
+
+            // Auto-assign tags based on file name & parent folder hierarchy
+            for s in engine.suggest(&name, &rel) {
+                if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, "category", "system") {
+                    let source = match s.source {
+                        scout_tagging::Source::FilenameRule => "filename_rule",
+                        scout_tagging::Source::FolderRule => "folder_rule",
+                    };
+                    let _ = scout_db::record_automatic_tag(
+                        &txb, id, tag_id, source, Some(s.score), Some(&s.detail),
+                    );
+                }
+            }
+
             out.push((id, was_changed, rel));
         }
         txb.commit()?;
@@ -250,6 +265,35 @@ fn run(
     )?;
     let _ = tx.send(ScanEvent::RootDone { root_id, run_id, missing });
     Ok(())
+}
+
+/// Batch-tag all existing files in the database using the lexical rules engine.
+pub fn tag_all_files(c: &mut rusqlite::Connection) -> Result<usize> {
+    let engine = scout_tagging::default_engine();
+    let mut stmt = c.prepare("SELECT id, name, rel_path FROM files WHERE missing_since IS NULL")?;
+    let files: Vec<(i64, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    drop(stmt);
+
+    let mut tagged = 0;
+    let txb = c.transaction()?;
+    for (fid, name, rel) in &files {
+        for s in engine.suggest(name, rel) {
+            if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, "category", "system") {
+                let source = match s.source {
+                    scout_tagging::Source::FilenameRule => "filename_rule",
+                    scout_tagging::Source::FolderRule => "folder_rule",
+                };
+                let _ = scout_db::record_automatic_tag(
+                    &txb, *fid, tag_id, source, Some(s.score), Some(&s.detail),
+                );
+                tagged += 1;
+            }
+        }
+    }
+    txb.commit()?;
+    Ok(tagged)
 }
 
 fn finish_run(
