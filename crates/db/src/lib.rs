@@ -11,6 +11,66 @@ pub struct Db {
     pub conn: Connection,
 }
 
+pub fn natural_cmp(s1: &str, s2: &str) -> std::cmp::Ordering {
+    let mut it1 = s1.chars().peekable();
+    let mut it2 = s2.chars().peekable();
+
+    while let (Some(&c1), Some(&c2)) = (it1.peek(), it2.peek()) {
+        if c1.is_ascii_digit() && c2.is_ascii_digit() {
+            let mut digits1 = Vec::new();
+            while let Some(&d) = it1.peek() {
+                if d.is_ascii_digit() {
+                    digits1.push(d);
+                    it1.next();
+                } else {
+                    break;
+                }
+            }
+
+            let mut digits2 = Vec::new();
+            while let Some(&d) = it2.peek() {
+                if d.is_ascii_digit() {
+                    digits2.push(d);
+                    it2.next();
+                } else {
+                    break;
+                }
+            }
+
+            let nz1 = digits1.iter().skip_while(|&&d| d == '0').count();
+            let nz2 = digits2.iter().skip_while(|&&d| d == '0').count();
+
+            if nz1 != nz2 {
+                return nz1.cmp(&nz2);
+            }
+
+            let sig1 = &digits1[digits1.len() - nz1..];
+            let sig2 = &digits2[digits2.len() - nz2..];
+            if sig1 != sig2 {
+                return sig1.cmp(sig2);
+            }
+
+            if digits1.len() != digits2.len() {
+                return digits1.len().cmp(&digits2.len());
+            }
+        } else {
+            let l1 = c1.to_lowercase().collect::<Vec<_>>();
+            let l2 = c2.to_lowercase().collect::<Vec<_>>();
+            if l1 != l2 {
+                return l1.cmp(&l2);
+            }
+            it1.next();
+            it2.next();
+        }
+    }
+
+    match (it1.next(), it2.next()) {
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
 pub fn apply_pragmas(c: &Connection) -> Result<()> {
     c.pragma_update(None, "busy_timeout", 5000i64)?;
     c.pragma_update(None, "journal_mode", "WAL")?;
@@ -18,6 +78,7 @@ pub fn apply_pragmas(c: &Connection) -> Result<()> {
     c.pragma_update(None, "foreign_keys", "ON")?;
     c.pragma_update(None, "temp_store", "MEMORY")?;
     c.pragma_update(None, "cache_size", -20000i64)?; // ~20MB page cache
+    c.create_collation("NATURALNOCASE", natural_cmp)?;
     Ok(())
 }
 
@@ -25,6 +86,7 @@ pub fn apply_pragmas(c: &Connection) -> Result<()> {
 const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("../migrations/0001_init.sql")),
     ("0002_dedup_file_tags", include_str!("../migrations/0002_dedup_file_tags.sql")),
+    ("0003_musical_keys_enharmonics", include_str!("../migrations/0003_musical_keys_enharmonics.sql")),
 ];
 
 pub fn open(path: &Path) -> Result<Db> {
@@ -233,4 +295,62 @@ pub fn get_tag(c: &Connection, id: i64) -> Result<Option<(String, String)>> {
         |r| Ok((r.get(0)?, r.get(1)?)),
     )
     .optional()?)
+}
+
+pub fn find_musical_key(c: &Connection, key_or_camelot: &str) -> Result<Option<(i64, String, String)>> {
+    let lower = key_or_camelot.to_ascii_lowercase();
+    c.query_row(
+        "SELECT id, label, camelot FROM musical_keys
+         WHERE lower(label) = ?1 OR lower(camelot) = ?1 LIMIT 1",
+        params![lower],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn update_file_musical_info(
+    c: &Connection,
+    file_id: i64,
+    bpm: Option<f64>,
+    key_id: Option<i64>,
+    is_loop: Option<bool>,
+) -> Result<()> {
+    c.execute(
+        "UPDATE files SET bpm = coalesce(?2, bpm),
+                          key_id = coalesce(?3, key_id),
+                          is_loop = coalesce(?4, is_loop)
+         WHERE id = ?1",
+        params![file_id, bpm, key_id, is_loop.map(|b| b as i64)],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_natural_sort() {
+        let mut list = vec![
+            "Perc 11.wav",
+            "Perc 1.wav",
+            "Perc 10.wav",
+            "Perc 2.wav",
+            "Perc 20.wav",
+            "Perc 3.wav",
+        ];
+        list.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            list,
+            vec![
+                "Perc 1.wav",
+                "Perc 2.wav",
+                "Perc 3.wav",
+                "Perc 10.wav",
+                "Perc 11.wav",
+                "Perc 20.wav",
+            ]
+        );
+    }
 }

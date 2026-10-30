@@ -1,7 +1,7 @@
 //! crates/audio — audio decode and streaming preview with resilient device negotiation and resampled playback.
 use std::fs::File;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -122,6 +122,7 @@ pub enum AudioBackend {
 
 pub struct Player {
     pub position: Arc<AtomicUsize>, // sample index (0..samples.len())
+    pub seek_frame: Arc<AtomicI64>, // target sample index to seek to, -1 if none
     pub playing: Arc<AtomicBool>,
     pub looping: Arc<AtomicBool>,
     pub volume_bits: Arc<AtomicU32>,
@@ -132,12 +133,14 @@ pub struct Player {
 impl Player {
     pub fn play(decoded: Arc<Decoded>) -> Result<Self> {
         let position = Arc::new(AtomicUsize::new(0));
+        let seek_frame = Arc::new(AtomicI64::new(-1));
         let playing = Arc::new(AtomicBool::new(true));
         let looping = Arc::new(AtomicBool::new(false));
         let volume_bits = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let pitch_semitones = Arc::new(AtomicI32::new(0));
 
         let pos_clone = position.clone();
+        let seek_clone = seek_frame.clone();
         let playing_clone = playing.clone();
         let loop_clone = looping.clone();
         let vol_clone = volume_bits.clone();
@@ -179,11 +182,16 @@ impl Player {
                     let pitch_speed = 2.0_f64.powf(pitch as f64 / 12.0);
                     let speed = resample_base * pitch_speed;
 
-                    // Sync if user sought
-                    let target_sample_pos = pos_clone.load(Ordering::Relaxed);
-                    let target_frame = (target_sample_pos / sample_channels) as f64;
-                    if (target_frame - current_frame_frac).abs() > 100.0 {
-                        current_frame_frac = target_frame;
+                    // Handle pending seek request or drift sync
+                    let req = seek_clone.swap(-1, Ordering::Relaxed);
+                    if req >= 0 {
+                        current_frame_frac = (req as usize / sample_channels) as f64;
+                    } else {
+                        let target_sample_pos = pos_clone.load(Ordering::Relaxed);
+                        let target_frame = (target_sample_pos / sample_channels) as f64;
+                        if (target_frame - current_frame_frac).abs() > 100.0 {
+                            current_frame_frac = target_frame;
+                        }
                     }
 
                     if total_frames == 0 {
@@ -252,6 +260,7 @@ impl Player {
                 let stop_signal = Arc::new(AtomicBool::new(false));
                 let stop_clone = stop_signal.clone();
                 let v_pos = position.clone();
+                let v_seek = seek_frame.clone();
                 let v_playing = playing.clone();
                 let v_loop = looping.clone();
                 let v_pitch = pitch_semitones.clone();
@@ -263,6 +272,10 @@ impl Player {
                     let tick_dur = Duration::from_millis(25);
                     while !stop_clone.load(Ordering::Relaxed) {
                         std::thread::sleep(tick_dur);
+                        let req = v_seek.swap(-1, Ordering::Relaxed);
+                        if req >= 0 {
+                            v_pos.store(req as usize, Ordering::Relaxed);
+                        }
                         if !v_playing.load(Ordering::Relaxed) {
                             continue;
                         }
@@ -290,6 +303,7 @@ impl Player {
 
         Ok(Self {
             position,
+            seek_frame,
             playing,
             looping,
             volume_bits,
@@ -304,6 +318,16 @@ impl Player {
 
     pub fn resume(&self) {
         self.playing.store(true, Ordering::Relaxed);
+    }
+
+    pub fn seek(&self, sample_idx: usize) {
+        self.seek_frame.store(sample_idx as i64, Ordering::Relaxed);
+        self.position.store(sample_idx, Ordering::Relaxed);
+    }
+
+    pub fn restart(&self) {
+        self.seek(0);
+        self.resume();
     }
 
     pub fn set_loop(&self, looping: bool) {
@@ -321,14 +345,13 @@ impl Player {
     pub fn seek_fraction(&self, frac: f32, decoded: &Decoded) {
         let frac = frac.clamp(0.0, 1.0);
         let sample_idx = (frac * decoded.samples.len() as f32) as usize;
-        self.position.store(sample_idx.min(decoded.samples.len()), Ordering::Relaxed);
+        self.seek(sample_idx.min(decoded.samples.len()));
     }
 
     pub fn seek_seconds(&self, secs: f32, decoded: &Decoded) {
         let frame = (secs * decoded.sample_rate as f32) as usize;
         let sample_idx = frame * decoded.channels as usize;
-        self.position
-            .store(sample_idx.min(decoded.samples.len()), Ordering::Relaxed);
+        self.seek(sample_idx.min(decoded.samples.len()));
     }
 }
 

@@ -115,6 +115,11 @@ struct SampleManagerApp {
     adsr_dry_run: bool,
     adsr_report: Option<ImportReport>,
     adsr_error: Option<String>,
+
+    // Outbound Drag & Inbound Drop state
+    is_dragging_export: bool,
+    pending_dropped_path: Option<PathBuf>,
+    show_drop_modal: bool,
 }
 
 impl SampleManagerApp {
@@ -185,6 +190,9 @@ impl SampleManagerApp {
             adsr_dry_run: true,
             adsr_report: None,
             adsr_error: None,
+            is_dragging_export: false,
+            pending_dropped_path: None,
+            show_drop_modal: false,
         };
 
         app.load_metadata();
@@ -279,6 +287,17 @@ impl SampleManagerApp {
         }
         self.selected_row_index = Some(index);
         let row = &self.file_rows[index];
+
+        // Default loop setting: ON for loops, OFF for one-shots
+        let is_loop = row.is_loop.unwrap_or_else(|| {
+            row.name.to_lowercase().contains("loop")
+                || row.rel_path.to_lowercase().contains("loop")
+                || row.tags.iter().any(|t| t == "loop")
+        });
+        self.loop_playback = is_loop;
+        if let Some(player) = &self.current_player {
+            player.set_loop(self.loop_playback);
+        }
 
         // Resolve absolute path from root
         let full_path: Option<PathBuf> = self
@@ -462,6 +481,38 @@ impl SampleManagerApp {
         }
     }
 
+    fn restart_play(&mut self) {
+        if let Some(player) = &self.current_player {
+            player.restart();
+        } else if let Some(path) = self.selected_full_path.clone() {
+            self.load_and_play(&path);
+        }
+    }
+
+    fn add_root_path(&mut self, path: &Path, start_scan: bool) -> Result<i64, String> {
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let s = canonical.to_string_lossy().to_string();
+        self.db
+            .conn
+            .execute(
+                "INSERT INTO roots(path) VALUES (?1) ON CONFLICT(path) DO UPDATE SET enabled=1",
+                [&s],
+            )
+            .map_err(|e| format!("DB error adding root: {e}"))?;
+
+        let rid: i64 = self
+            .db
+            .conn
+            .query_row("SELECT id FROM roots WHERE path = ?1", [&s], |r| r.get(0))
+            .map_err(|e| format!("Failed to retrieve root id: {e}"))?;
+
+        self.load_metadata();
+        if start_scan {
+            self.start_library_scan(rid);
+        }
+        Ok(rid)
+    }
+
     fn stop_play(&mut self) {
         if let Some(player) = &self.current_player {
             player.position.store(0, Ordering::Relaxed);
@@ -514,6 +565,11 @@ impl SampleManagerApp {
     }
 
     fn trigger_drag_export(&mut self, path: &Path, ctx: &egui::Context) {
+        if self.is_dragging_export {
+            return;
+        }
+        self.is_dragging_export = true;
+
         let abs_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let path_str = abs_path.to_string_lossy().to_string();
         let uri = format!("file://{path_str}");
@@ -533,13 +589,15 @@ impl SampleManagerApp {
                     0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
                     0x42, 0x60, 0x82,
                 ];
-                let _ = drag::start_drag(
-                    &wh,
-                    item,
-                    drag::Image::Raw(TRANSPARENT_PNG.to_vec()),
-                    |_res, _pos| {},
-                    Default::default(),
-                );
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = drag::start_drag(
+                        &wh,
+                        item,
+                        drag::Image::Raw(TRANSPARENT_PNG.to_vec()),
+                        |_res, _pos| {},
+                        Default::default(),
+                    );
+                }));
             }
         }
 
@@ -703,12 +761,13 @@ impl SampleManagerApp {
                 }
             }
 
-            // 'l', Spacebar, or Enter: play/pause
-            if ctx.input(|i| {
-                i.key_pressed(egui::Key::L)
-                    || i.key_pressed(egui::Key::Space)
-                    || i.key_pressed(egui::Key::Enter)
-            }) {
+            // 'l': trigger playback from beginning (retrigger, never pause)
+            if ctx.input(|i| i.key_pressed(egui::Key::L)) {
+                self.restart_play();
+            }
+
+            // Spacebar or Enter: toggle play/pause
+            if ctx.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)) {
                 self.toggle_play();
             }
 
@@ -1097,9 +1156,13 @@ impl SampleManagerApp {
                 .map(|p| p.playing.load(Ordering::Relaxed))
                 .unwrap_or(false);
 
-            let play_label = if is_playing { "PAUSE (L)" } else { "PLAY (L)" };
+            let play_label = if is_playing { "PAUSE (Space)" } else { "PLAY (Space)" };
             if ui.button(egui::RichText::new(play_label).strong()).clicked() {
                 self.toggle_play();
+            }
+
+            if ui.button("RESTART (L)").on_hover_text("Trigger playback from start (L)").clicked() {
+                self.restart_play();
             }
 
             if ui.button("STOP").clicked() {
@@ -1135,11 +1198,22 @@ impl SampleManagerApp {
                 "0 st".to_string()
             };
 
-            let pitch_resp = ui.selectable_label(self.pitch_semitones != 0, pitch_label);
+            let pitch_resp = ui.selectable_label(self.pitch_semitones != 0, pitch_label)
+                .on_hover_text("Transposition (Scroll or click to reset)");
             if pitch_resp.clicked() {
                 self.pitch_semitones = 0;
                 if let Some(player) = &self.current_player {
                     player.set_pitch(0);
+                }
+            }
+            if pitch_resp.hovered() {
+                let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll_y.abs() > 0.0 {
+                    let delta = if scroll_y > 0.0 { 1 } else { -1 };
+                    self.pitch_semitones = (self.pitch_semitones + delta).clamp(-12, 12);
+                    if let Some(player) = &self.current_player {
+                        player.set_pitch(self.pitch_semitones);
+                    }
                 }
             }
 
@@ -1158,7 +1232,14 @@ impl SampleManagerApp {
             let vol_slider = ui.add_sized(
                 [80.0, 18.0],
                 egui::Slider::new(&mut self.volume, 0.0..=2.0).show_value(false),
-            );
+            ).on_hover_text("Master Volume (Scroll or drag)");
+            if vol_slider.hovered() {
+                let scroll_y = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll_y.abs() > 0.0 {
+                    let step = if scroll_y > 0.0 { 0.05 } else { -0.05 };
+                    self.volume = (self.volume + step).clamp(0.0, 2.0);
+                }
+            }
             if vol_slider.changed() || (self.volume - prev_vol).abs() > 0.001 {
                 if let Some(player) = &self.current_player {
                     player.set_volume(self.volume);
@@ -1233,6 +1314,14 @@ impl SampleManagerApp {
         let mut root_to_select = None;
         let mut clear_root = false;
 
+        enum LibAction {
+            Scan(i64),
+            ForceRescan(i64),
+            Reveal(String),
+            Remove(i64),
+        }
+        let mut lib_action = None;
+
         egui::ScrollArea::vertical()
             .id_salt("sidebar_libraries_scroll")
             .max_height(140.0)
@@ -1254,8 +1343,63 @@ impl SampleManagerApp {
                     if resp.clicked() {
                         root_to_select = Some(*rid);
                     }
+
+                    // Right click context menu for library folder
+                    resp.context_menu(|ui| {
+                        ui.label(egui::RichText::new(folder_name).strong().color(Color32::WHITE));
+                        ui.label(egui::RichText::new(path).size(11.0).color(Color32::from_rgb(180, 180, 180)));
+                        ui.separator();
+                        if ui.button("Scan / Rescan Library").clicked() {
+                            lib_action = Some(LibAction::Scan(*rid));
+                            ui.close();
+                        }
+                        if ui.button("Force Rescan (Full Walk)").clicked() {
+                            lib_action = Some(LibAction::ForceRescan(*rid));
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Reveal in File Manager / Finder").clicked() {
+                            lib_action = Some(LibAction::Reveal(path.clone()));
+                            ui.close();
+                        }
+                        if ui.button("Remove Library").clicked() {
+                            lib_action = Some(LibAction::Remove(*rid));
+                            ui.close();
+                        }
+                    });
                 }
             });
+
+        match lib_action {
+            Some(LibAction::Scan(rid)) => {
+                self.start_library_scan(rid);
+            }
+            Some(LibAction::ForceRescan(rid)) => {
+                let _ = self.db.conn.execute("UPDATE files SET last_seen_run = NULL WHERE root_id = ?1", [rid]);
+                let _ = scout_scanner::tag_all_files(&mut self.db.conn);
+                self.start_library_scan(rid);
+            }
+            Some(LibAction::Reveal(p)) => {
+                let p = PathBuf::from(p);
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open").arg(&p).spawn();
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+                }
+            }
+            Some(LibAction::Remove(rid)) => {
+                let _ = self.db.conn.execute("DELETE FROM roots WHERE id = ?1", [rid]);
+                if self.selected_root == Some(rid) {
+                    self.selected_root = None;
+                }
+                self.load_metadata();
+                self.run_query();
+            }
+            None => {}
+        }
 
         if clear_root {
             self.selected_root = None;
@@ -1360,7 +1504,7 @@ impl SampleManagerApp {
                     self.yank_selected_file(ui.ctx());
                 }
                 let drag_head = ui.add(egui::Button::new("DRAG TO FINDER/DAW").sense(Sense::click_and_drag()));
-                if drag_head.drag_started() || drag_head.dragged() {
+                if drag_head.drag_started() {
                     self.trigger_drag_export(&path, ui.ctx());
                 }
                 if ui.button("REVEAL").on_hover_text("Reveal selected file in Finder / File Manager").clicked() {
@@ -1404,6 +1548,8 @@ impl SampleManagerApp {
         let mut trigger_yank_file = false;
         let mut trigger_drag_row = None;
         let mut trigger_reveal = false;
+        let mut trigger_restart_play = false;
+        let mut trigger_toggle_play = false;
 
         table
             .header(24.0, |mut header| {
@@ -1502,7 +1648,7 @@ impl SampleManagerApp {
                     row.col(|ui| {
                         let drag_btn = ui.add(egui::Button::new("::").sense(Sense::click_and_drag()))
                             .on_hover_text("Drag sample out to Finder, Desktop, or DAW");
-                        if drag_btn.drag_started() || drag_btn.dragged() {
+                        if drag_btn.drag_started() {
                             trigger_drag_row = Some(idx);
                         }
                     });
@@ -1522,8 +1668,14 @@ impl SampleManagerApp {
                         resp.context_menu(|ui| {
                             ui.label(egui::RichText::new(&item.name).strong().color(Color32::WHITE));
                             ui.separator();
-                            if ui.button("Play / Pause (Space / L)").clicked() {
+                            if ui.button("Play from Start (L)").clicked() {
                                 sample_to_select = Some(idx);
+                                trigger_restart_play = true;
+                                ui.close();
+                            }
+                            if ui.button("Play / Pause (Space)").clicked() {
+                                sample_to_select = Some(idx);
+                                trigger_toggle_play = true;
                                 ui.close();
                             }
                             let fav_label = if item.favorite { "Unfavorite (H)" } else { "Favorite (H)" };
@@ -1566,7 +1718,8 @@ impl SampleManagerApp {
 
                     // Musical Key column
                     row.col(|ui| {
-                        ui.label(egui::RichText::new("--").color(Color32::from_rgb(200, 200, 200)));
+                        let key_str = item.key.as_deref().unwrap_or("--");
+                        ui.label(egui::RichText::new(key_str).strong().color(Color32::WHITE));
                     });
 
                     // BPM column
@@ -1586,7 +1739,11 @@ impl SampleManagerApp {
 
                     // Type (Loop / Shot)
                     row.col(|ui| {
-                        let is_loop = item.rel_path.to_lowercase().contains("loop") || item.tags.iter().any(|t| t == "loop");
+                        let is_loop = item.is_loop.unwrap_or_else(|| {
+                            item.rel_path.to_lowercase().contains("loop")
+                                || item.name.to_lowercase().contains("loop")
+                                || item.tags.iter().any(|t| t == "loop")
+                        });
                         let type_text = if is_loop { "LOOP" } else { "SHOT" };
                         ui.label(egui::RichText::new(type_text).size(11.0).strong().color(Color32::WHITE));
                     });
@@ -1610,6 +1767,11 @@ impl SampleManagerApp {
 
         if let Some(idx) = sample_to_select {
             self.select_sample(idx);
+            if trigger_restart_play {
+                self.restart_play();
+            } else if trigger_toggle_play {
+                self.toggle_play();
+            }
         }
         if let Some(idx) = trigger_drag_row {
             self.select_sample(idx);
@@ -1696,36 +1858,14 @@ impl SampleManagerApp {
                                 } else if !expanded.is_dir() {
                                     self.add_modal_error = Some(format!("Path is not a directory: {}", expanded.display()));
                                 } else {
-                                    match expanded.canonicalize() {
-                                        Ok(canonical) => {
-                                            let s = canonical.to_string_lossy().to_string();
-                                            if let Err(e) = self.db.conn.execute(
-                                                "INSERT INTO roots(path) VALUES (?1) ON CONFLICT(path) DO UPDATE SET enabled=1",
-                                                [&s],
-                                            ) {
-                                                self.add_modal_error = Some(format!("DB error adding root: {e}"));
-                                            } else {
-                                                let root_id: Result<i64, _> = self.db.conn.query_row(
-                                                    "SELECT id FROM roots WHERE path = ?1",
-                                                    [&s],
-                                                    |r| r.get(0),
-                                                );
-                                                match root_id {
-                                                    Ok(rid) => {
-                                                        self.load_metadata();
-                                                        self.start_library_scan(rid);
-                                                        self.new_root_path.clear();
-                                                        self.add_modal_error = None;
-                                                        self.show_add_modal = false;
-                                                    }
-                                                    Err(e) => {
-                                                        self.add_modal_error = Some(format!("Failed to retrieve root id: {e}"));
-                                                    }
-                                                }
-                                            }
+                                    match self.add_root_path(&expanded, true) {
+                                        Ok(_) => {
+                                            self.new_root_path.clear();
+                                            self.add_modal_error = None;
+                                            self.show_add_modal = false;
                                         }
                                         Err(e) => {
-                                            self.add_modal_error = Some(format!("Canonicalization failed: {e}"));
+                                            self.add_modal_error = Some(e);
                                         }
                                     }
                                 }
@@ -1738,6 +1878,52 @@ impl SampleManagerApp {
                         }
                     });
                 });
+        }
+
+        // Modal: Finder Drag & Drop Library Confirmation
+        if self.show_drop_modal {
+            if let Some(drop_path) = self.pending_dropped_path.clone() {
+                let path_str = drop_path.to_string_lossy().to_string();
+
+                egui::Window::new("Add Dropped Folder to Library")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(
+                            egui::RichText::new("A folder was dropped into the window:")
+                                .size(12.0)
+                                .color(Color32::WHITE),
+                        );
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new(&path_str)
+                                .size(11.5)
+                                .monospace()
+                                .color(Color32::from_rgb(180, 205, 230)),
+                        );
+                        ui.add_space(8.0);
+                        ui.label("Would you like to add this folder to your sample libraries?");
+                        ui.add_space(8.0);
+
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("Add & Scan Now").strong().color(Color32::WHITE)).clicked() {
+                                let _ = self.add_root_path(&drop_path, true);
+                                self.show_drop_modal = false;
+                                self.pending_dropped_path = None;
+                            }
+                            if ui.button("Add (Scan Later)").clicked() {
+                                let _ = self.add_root_path(&drop_path, false);
+                                self.show_drop_modal = false;
+                                self.pending_dropped_path = None;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                self.show_drop_modal = false;
+                                self.pending_dropped_path = None;
+                            }
+                        });
+                    });
+            }
         }
 
         // Modal: ADSR Importer
@@ -1875,6 +2061,31 @@ impl eframe::App for SampleManagerApp {
         apply_high_contrast_theme(&ctx);
         self.poll_scanner();
         self.handle_input(&ctx);
+
+        // Reset outbound drag state once mouse pointer is released
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.is_dragging_export = false;
+        }
+
+        // Inbound drag & drop from Finder / file manager
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if !dropped.is_empty() {
+            for df in dropped {
+                let p = df.path();
+                if !p.as_os_str().is_empty() {
+                    let target_dir = if p.is_dir() {
+                        p.to_path_buf()
+                    } else if let Some(parent) = p.parent() {
+                        parent.to_path_buf()
+                    } else {
+                        p.to_path_buf()
+                    };
+                    self.pending_dropped_path = Some(target_dir);
+                    self.show_drop_modal = true;
+                    break;
+                }
+            }
+        }
 
         // macOS-style Top Menu Bar
         egui::Panel::top("macos_menu_bar").show(ui, |ui| {

@@ -118,6 +118,15 @@ fn run(
                 &txb, root_id, &rel, &name, &tokens, &ext, size, mtime, run_id,
             )?;
 
+            // Extract musical properties: BPM, musical key, and loop status
+            let musical = scout_tagging::extract_musical_info(&name, &rel);
+            let key_id = if let Some(key_str) = &musical.key {
+                scout_db::find_musical_key(&txb, key_str).ok().flatten().map(|(kid, _, _)| kid)
+            } else {
+                None
+            };
+            let _ = scout_db::update_file_musical_info(&txb, id, musical.bpm, key_id, musical.is_loop);
+
             // Auto-assign tags based on file name & parent folder hierarchy (deduplicated by tag)
             let mut best_by_tag: std::collections::HashMap<String, scout_tagging::Suggestion> = std::collections::HashMap::new();
             for s in engine.suggest(&name, &rel) {
@@ -290,6 +299,15 @@ pub fn tag_all_files(c: &mut rusqlite::Connection) -> Result<usize> {
     let mut tagged = 0;
     let txb = c.transaction()?;
     for (fid, name, rel) in &files {
+        // Re-extract and update musical properties: BPM, musical key, and loop status
+        let musical = scout_tagging::extract_musical_info(name, rel);
+        let key_id = if let Some(key_str) = &musical.key {
+            scout_db::find_musical_key(&txb, key_str).ok().flatten().map(|(kid, _, _)| kid)
+        } else {
+            None
+        };
+        let _ = scout_db::update_file_musical_info(&txb, *fid, musical.bpm, key_id, musical.is_loop);
+
         let mut best_by_tag: std::collections::HashMap<String, scout_tagging::Suggestion> = std::collections::HashMap::new();
         for s in engine.suggest(name, rel) {
             best_by_tag

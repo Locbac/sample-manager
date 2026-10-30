@@ -160,6 +160,14 @@ fn main() -> anyhow::Result<()> {
             drop(st);
             let tx = db.conn.transaction()?;
             for (fid, name, rel) in &files {
+                let musical = scout_tagging::extract_musical_info(name, rel);
+                let key_id = if let Some(key_str) = &musical.key {
+                    scout_db::find_musical_key(&tx, key_str).ok().flatten().map(|(kid, _, _)| kid)
+                } else {
+                    None
+                };
+                let _ = scout_db::update_file_musical_info(&tx, *fid, musical.bpm, key_id, musical.is_loop);
+
                 for s in engine.suggest(name, rel) {
                     let tag_id = scout_db::ensure_tag(&tx, &s.tag, "category", "system")?;
                     let source = match s.source {

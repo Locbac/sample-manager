@@ -6,6 +6,9 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
+pub mod musical;
+pub use musical::{extract_bpm, extract_is_loop, extract_key, extract_musical_info, MusicalInfo};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Source {
     FilenameRule,

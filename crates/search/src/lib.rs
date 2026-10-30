@@ -49,6 +49,9 @@ pub struct FileRow {
     pub ext: String,
     pub duration_ms: Option<i64>,
     pub bpm: Option<f64>,
+    pub key: Option<String>,
+    pub camelot: Option<String>,
+    pub is_loop: Option<bool>,
     pub size: i64,
     pub favorite: bool,
     pub total: i64, // window count, valid on every row
@@ -72,10 +75,10 @@ pub fn fts_expr(q: &str) -> Option<String> {
 }
 
 pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>> {
-    // whitelist ORDER BY — never interpolate raw user input here
+    // whitelist ORDER BY — uses natural collation for intuitive numerical ordering
     let order = match q.sort {
-        Sort::NameAsc => "f.name COLLATE NOCASE ASC, f.id",
-        Sort::PathAsc => "f.rel_path COLLATE NOCASE ASC, f.id",
+        Sort::NameAsc => "f.name COLLATE NATURALNOCASE ASC, f.id",
+        Sort::PathAsc => "f.rel_path COLLATE NATURALNOCASE ASC, f.id",
         Sort::DurationDesc => "f.duration_ms DESC NULLS LAST, f.id",
         Sort::BpmAsc => "f.bpm ASC NULLS LAST, f.id",
         Sort::SizeDesc => "f.size DESC, f.id",
@@ -162,8 +165,13 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
                     FROM file_tags ft
                     JOIN tags t ON t.id = ft.tag_id
                     WHERE ft.file_id = f.id AND ft.state != 'dismissed'
-                ) AS tag_list
-         FROM files f {fts}
+                ) AS tag_list,
+                mk.label AS key_label,
+                mk.camelot AS camelot_label,
+                f.is_loop
+         FROM files f
+         LEFT JOIN musical_keys mk ON mk.id = f.key_id
+         {fts}
          WHERE {w}
          ORDER BY {order}
          LIMIT ? OFFSET ?",
@@ -190,6 +198,11 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
             }
             let tags_display = tags.join(", ");
 
+            let key: Option<String> = r.get(10)?;
+            let camelot: Option<String> = r.get(11)?;
+            let is_loop_raw: Option<i64> = r.get(12)?;
+            let is_loop = is_loop_raw.map(|v| v != 0);
+
             Ok(FileRow {
                 id: r.get(0)?,
                 rel_path: r.get(1)?,
@@ -197,6 +210,9 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
                 ext: r.get(3)?,
                 duration_ms: r.get(4)?,
                 bpm: r.get(5)?,
+                key,
+                camelot,
+                is_loop,
                 size: r.get(6)?,
                 favorite: r.get::<_, i64>(7)? == 1,
                 total: r.get(8)?,
@@ -206,4 +222,59 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_search_natural_ordering() {
+        let db = scout_db::Db {
+            conn: rusqlite::Connection::open_in_memory().unwrap(),
+        };
+        scout_db::apply_pragmas(&db.conn).unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TABLE roots (id INTEGER PRIMARY KEY, path TEXT UNIQUE, enabled INTEGER DEFAULT 1);
+                 INSERT INTO roots (id, path) VALUES (1, '/test');
+                 CREATE TABLE files (
+                     id INTEGER PRIMARY KEY,
+                     root_id INTEGER,
+                     rel_path TEXT,
+                     name TEXT,
+                     ext TEXT,
+                     size INTEGER,
+                     mtime INTEGER,
+                     duration_ms INTEGER,
+                     bpm REAL,
+                     key_id INTEGER,
+                     is_loop INTEGER,
+                     missing_since TEXT
+                 );
+                 CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+                 CREATE TABLE file_tags (file_id INTEGER, tag_id INTEGER, state TEXT);
+                 CREATE TABLE favorites (file_id INTEGER PRIMARY KEY);
+                 CREATE TABLE musical_keys (id INTEGER PRIMARY KEY, label TEXT, camelot TEXT);
+                 INSERT INTO files (id, root_id, rel_path, name, ext, size, mtime) VALUES
+                   (1, 1, 'Perc 11.wav', 'Perc 11.wav', 'wav', 100, 1),
+                   (2, 1, 'Perc 1.wav', 'Perc 1.wav', 'wav', 100, 1),
+                   (3, 1, 'Perc 2.wav', 'Perc 2.wav', 'wav', 100, 1),
+                   (4, 1, 'Perc 10.wav', 'Perc 10.wav', 'wav', 100, 1),
+                   (5, 1, 'Perc 20.wav', 'Perc 20.wav', 'wav', 100, 1);",
+            )
+            .unwrap();
+
+        let q = SearchQuery {
+            sort: Sort::NameAsc,
+            limit: 50,
+            ..Default::default()
+        };
+        let rows = search(&db.conn, &q).unwrap();
+        let names: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+        assert_eq!(
+            names,
+            vec!["Perc 1.wav", "Perc 2.wav", "Perc 10.wav", "Perc 11.wav", "Perc 20.wav"]
+        );
+    }
 }
