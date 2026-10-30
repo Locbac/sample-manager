@@ -158,7 +158,7 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
                 EXISTS(SELECT 1 FROM favorites fv WHERE fv.file_id = f.id) AS fav,
                 count(*) OVER () AS total,
                 (
-                    SELECT GROUP_CONCAT(t.name, ', ')
+                    SELECT GROUP_CONCAT(DISTINCT t.name)
                     FROM file_tags ft
                     JOIN tags t ON t.id = ft.tag_id
                     WHERE ft.file_id = f.id AND ft.state != 'dismissed'
@@ -179,16 +179,16 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
     let rows = stmt
         .query_map(rusqlite::params_from_iter(params), |r| {
             let tags_raw: Option<String> = r.get(9)?;
-            let tags: Vec<String> = tags_raw
-                .as_deref()
-                .map(|s| {
-                    s.split(',')
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default();
-            let tags_display = tags_raw.unwrap_or_default();
+            let mut tags: Vec<String> = Vec::new();
+            if let Some(s) = tags_raw.as_deref() {
+                let mut seen = std::collections::HashSet::new();
+                for t in s.split(',').map(|t| t.trim()).filter(|t| !t.is_empty()) {
+                    if seen.insert(t.to_string()) {
+                        tags.push(t.to_string());
+                    }
+                }
+            }
+            let tags_display = tags.join(", ");
 
             Ok(FileRow {
                 id: r.get(0)?,

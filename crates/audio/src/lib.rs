@@ -193,10 +193,11 @@ impl Player {
 
                     let out_frames = output.len() / device_channels.max(1);
                     for f in 0..out_frames {
-                        let frame_floor = current_frame_frac.floor() as usize;
+                        let mut frame_floor = current_frame_frac.floor() as usize;
                         if frame_floor >= total_frames {
-                            if is_loop {
-                                current_frame_frac = 0.0;
+                            if is_loop && total_frames > 0 {
+                                current_frame_frac %= total_frames as f64;
+                                frame_floor = current_frame_frac.floor() as usize;
                             } else {
                                 playing_clone.store(false, Ordering::Relaxed);
                                 for sample in &mut output[f * device_channels..] {
@@ -206,17 +207,24 @@ impl Player {
                             }
                         }
 
-                        let frame_ceil = (frame_floor + 1).min(total_frames - 1);
+                        let frame_ceil = if is_loop && total_frames > 0 {
+                            (frame_floor + 1) % total_frames
+                        } else {
+                            (frame_floor + 1).min(total_frames.saturating_sub(1))
+                        };
                         let frac = (current_frame_frac - frame_floor as f64) as f32;
 
+                        let max_idx = data_cpal.samples.len().saturating_sub(1);
                         for dev_ch in 0..device_channels {
                             let src_ch = if sample_channels == 1 {
                                 0
                             } else {
                                 dev_ch % sample_channels
                             };
-                            let s1 = data_cpal.samples[frame_floor * sample_channels + src_ch];
-                            let s2 = data_cpal.samples[frame_ceil * sample_channels + src_ch];
+                            let idx1 = (frame_floor * sample_channels + src_ch).min(max_idx);
+                            let idx2 = (frame_ceil * sample_channels + src_ch).min(max_idx);
+                            let s1 = data_cpal.samples[idx1];
+                            let s2 = data_cpal.samples[idx2];
                             let val = s1 + frac * (s2 - s1);
                             output[f * device_channels + dev_ch] = (val * vol).clamp(-1.0, 1.0);
                         }
@@ -350,5 +358,16 @@ mod tests {
         assert!(pos > 0, "Position should advance during playback");
         player.pause();
         assert!(!player.playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_decode_wav_pcm() {
+        let path = Path::new("demo-samples/808_sub_kick_c.wav");
+        if path.exists() {
+            let decoded = decode(path).expect("Decode 808 PCM WAV should succeed");
+            assert!(decoded.samples.len() > 0);
+            assert_eq!(decoded.channels, 2);
+            assert_eq!(decoded.sample_rate, 44100);
+        }
     }
 }

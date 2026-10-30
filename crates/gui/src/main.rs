@@ -224,11 +224,11 @@ impl SampleManagerApp {
         // Load active tags with usage counts
         let mut tags = Vec::new();
         if let Ok(mut stmt) = self.db.conn.prepare(
-            "SELECT t.id, t.name, t.kind, COUNT(ft.file_id)
+            "SELECT t.id, t.name, t.kind, COUNT(DISTINCT ft.file_id)
              FROM tags t
              LEFT JOIN file_tags ft ON ft.tag_id = t.id AND ft.state = 'active'
              GROUP BY t.id, t.name, t.kind
-             ORDER BY COUNT(ft.file_id) DESC, t.name ASC",
+             ORDER BY COUNT(DISTINCT ft.file_id) DESC, t.name ASC",
         ) {
             if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))) {
                 for row in rows.flatten() {
@@ -294,10 +294,10 @@ impl SampleManagerApp {
             .ok()
             .map(PathBuf::from);
 
-        // Load active tags for the sample
+        // Load active tags for the sample (deduplicated)
         let mut tags = Vec::new();
         if let Ok(mut stmt) = self.db.conn.prepare(
-            "SELECT t.name FROM file_tags ft
+            "SELECT DISTINCT t.name FROM file_tags ft
              JOIN tags t ON t.id = ft.tag_id
              WHERE ft.file_id = ?1 AND ft.state = 'active'
              ORDER BY t.name ASC",

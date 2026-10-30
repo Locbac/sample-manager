@@ -24,6 +24,7 @@ pub fn apply_pragmas(c: &Connection) -> Result<()> {
 /// Ordered, idempotent migrations. Add a new tuple, never edit an applied one.
 const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("../migrations/0001_init.sql")),
+    ("0002_dedup_file_tags", include_str!("../migrations/0002_dedup_file_tags.sql")),
 ];
 
 pub fn open(path: &Path) -> Result<Db> {
@@ -96,24 +97,27 @@ pub fn record_automatic_tag(
     confidence: Option<f32>,
     detail: Option<&str>,
 ) -> Result<AssignmentOutcome> {
-    let existing: Option<String> = c
+    let existing: Option<(String, Option<f32>)> = c
         .query_row(
-            "SELECT state FROM file_tags
-             WHERE file_id=?1 AND tag_id=?2 AND source=?3
-               AND ifnull(source_detail,'') = ifnull(?4,'')",
-            params![file_id, tag_id, source, detail],
-            |r| r.get(0),
+            "SELECT state, confidence FROM file_tags
+             WHERE file_id=?1 AND tag_id=?2",
+            params![file_id, tag_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    match existing.as_deref() {
-        Some("dismissed") => Ok(AssignmentOutcome::KeptDismissed),
-        Some(_) => {
+    match existing {
+        Some((state, _)) if state == "dismissed" => Ok(AssignmentOutcome::KeptDismissed),
+        Some((_, old_conf)) => {
+            let new_conf = match (old_conf, confidence) {
+                (Some(o), Some(n)) => Some(o.max(n)),
+                (None, n) => n,
+                (o, None) => o,
+            };
             c.execute(
-                "UPDATE file_tags SET confidence = max(ifnull(confidence,0), ifnull(?4,0)),
+                "UPDATE file_tags SET confidence = ?3, source = ?4, source_detail = ?5,
                         updated_at = CURRENT_TIMESTAMP
-                 WHERE file_id=?1 AND tag_id=?2 AND source=?3
-                   AND ifnull(source_detail,'') = ifnull(?5,'')",
-                params![file_id, tag_id, source, confidence, detail],
+                 WHERE file_id=?1 AND tag_id=?2",
+                params![file_id, tag_id, new_conf, source, detail],
             )?;
             Ok(AssignmentOutcome::AlreadyActive)
         }

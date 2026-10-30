@@ -118,8 +118,19 @@ fn run(
                 &txb, root_id, &rel, &name, &tokens, &ext, size, mtime, run_id,
             )?;
 
-            // Auto-assign tags based on file name & parent folder hierarchy
+            // Auto-assign tags based on file name & parent folder hierarchy (deduplicated by tag)
+            let mut best_by_tag: std::collections::HashMap<String, scout_tagging::Suggestion> = std::collections::HashMap::new();
             for s in engine.suggest(&name, &rel) {
+                best_by_tag
+                    .entry(s.tag.clone())
+                    .and_modify(|existing| {
+                        if s.score > existing.score {
+                            *existing = s.clone();
+                        }
+                    })
+                    .or_insert(s);
+            }
+            for s in best_by_tag.into_values() {
                 if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, "category", "system") {
                     let source = match s.source {
                         scout_tagging::Source::FilenameRule => "filename_rule",
@@ -279,7 +290,18 @@ pub fn tag_all_files(c: &mut rusqlite::Connection) -> Result<usize> {
     let mut tagged = 0;
     let txb = c.transaction()?;
     for (fid, name, rel) in &files {
+        let mut best_by_tag: std::collections::HashMap<String, scout_tagging::Suggestion> = std::collections::HashMap::new();
         for s in engine.suggest(name, rel) {
+            best_by_tag
+                .entry(s.tag.clone())
+                .and_modify(|existing| {
+                    if s.score > existing.score {
+                        *existing = s.clone();
+                    }
+                })
+                .or_insert(s);
+        }
+        for s in best_by_tag.into_values() {
             if let Ok(tag_id) = scout_db::ensure_tag(&txb, &s.tag, "category", "system") {
                 let source = match s.source {
                     scout_tagging::Source::FilenameRule => "filename_rule",

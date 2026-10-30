@@ -44,7 +44,7 @@ sha2              = "0.10"
 # Feature-list only what you ship. "alac" and "isomp4" cover m4a; drop what
 # you do not want to support.
 symphonia         = { version = "0.5", default-features = false,
-                      features = ["wav", "mp3", "aac", "flac", "vorbis", "isomp4", "mkv", "alac"] }
+                      features = ["all-codecs", "all-formats"] }
 cpal              = "0.15"
 
 # --- embedded metadata -------------------------------------------------------
