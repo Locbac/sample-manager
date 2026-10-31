@@ -167,28 +167,6 @@ sample-manager/
 
 ## Building releases for all platforms
 
-Scout includes an automated GitHub Actions release workflow (`.github/workflows/release.yml`) that compiles binaries across all supported operating systems and architectures.
-
-### Automated GitHub Release (Recommended)
-
-To create a new release and build binaries for all targets:
-
-1. Tag the release:
-   ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
-   ```
-2. GitHub Actions will automatically spin up native runners and build:
-   - **macOS Universal Binary** (`scout-macos-universal.zip`): Dual-architecture executable supporting both Apple Silicon (ARM64) and Intel (x86_64).
-   - **Windows x86_64** (`scout-windows-x86_64.zip`): `scout-gui.exe` and `scout.exe`.
-   - **Linux x86_64** (`scout-linux-x86_64.tar.gz`).
-   - **Linux ARM64** (`scout-linux-arm64.tar.gz`).
-   - **Checksums** (`SHA256SUMS.txt`).
-
-A release will be automatically drafted and published on your GitHub repository with all binaries attached. You can also trigger this manually from the **Actions** tab on GitHub via `workflow_dispatch`.
-
-### Building locally
-
 If you want to compile release binaries manually on your local system:
 
 - **macOS (Universal Binary for both ARM64 and Intel)**:
