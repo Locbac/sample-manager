@@ -1,8 +1,52 @@
-/target
+# Build artifacts & Cargo outputs
+target/
+**/target/
+spikes/**/target/
 **/*.rs.bk
+*.dSYM/
+*.rlib
+
+# SQLite databases & runtime storage
 *.db
 *.db-wal
 *.db-shm
+*.sqlite
+*.sqlite3
+scout.db
+
+# Secrets & Environment variables
+.env
+.env.*
+*.pem
+*.key
+*.cert
+
+# Operating System metadata
 .DS_Store
-node_modules
-dist
+**/.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# IDEs & Editor configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+# Logs & crash reports
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node / Web artifacts (if spikes/frontend built)
+node_modules/
+**/node_modules/
+dist/
+build/
+.turbo/
+
