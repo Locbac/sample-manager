@@ -354,10 +354,8 @@ impl SampleManagerApp {
     }
 
     fn record_recent(&mut self, row: FileRow) {
-        if let Some(last) = self.session_recents.last() {
-            if last.id == row.id {
-                return;
-            }
+        if self.session_recents.iter().any(|r| r.id == row.id) {
+            return;
         }
         self.session_recents.push(row);
         if self.session_recents.len() > 1000 {
@@ -2915,6 +2913,22 @@ mod tests {
         app.run_query();
         assert_eq!(app.file_rows.len(), 1);
         assert_eq!(app.file_rows[0].id, 1);
+
+        // Test recents deduplication (A, B, C, B, C, B, C keeps only [A, B, C] at original stack position)
+        app.filter_favorite = false;
+        app.run_query();
+        app.session_recents.clear();
+        app.select_sample(0); // Sample 1
+        app.select_sample(1); // Sample 2
+        app.select_sample(2); // Sample 3
+        app.select_sample(1); // Sample 2 again
+        app.select_sample(2); // Sample 3 again
+        app.select_sample(1); // Sample 2 again
+        app.select_sample(2); // Sample 3 again
+        assert_eq!(app.session_recents.len(), 3);
+        assert_eq!(app.session_recents[0].id, 1);
+        assert_eq!(app.session_recents[1].id, 2);
+        assert_eq!(app.session_recents[2].id, 3);
 
         let _ = std::fs::remove_file(&db_path);
     }

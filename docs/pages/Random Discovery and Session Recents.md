@@ -54,6 +54,7 @@ During an active session, LocSamp keeps an in-memory journal of every sample aud
 - **Behavior**:
   - Displays all auditioned samples in chronological order.
   - Bounded to the last 1,000 samples to keep RAM minimal.
+  - **Unique Stack Deduping**: Samples already present in Recents are not duplicated or shifted to the end. For example, auditioning `A, B, C, B, C, B, C` keeps only `[A, B, C]` at their original discovery positions in the stack.
   - When navigating or auditioning samples from within the Recents tab, the list order is preserved: samples are never re-appended or re-ordered when played from within Recents.
   - Features a `[CLEAR RECENTS]` button to wipe history.
   - Fully in-memory: starts clean on each application launch.
