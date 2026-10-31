@@ -6,10 +6,10 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "scout", version, about = "sample library engine (headless)")]
+#[command(name = "locsamp-cli", version, about = "LocSamp sample library engine (headless)")]
 struct Cli {
     /// SQLite database file (local disk only — never a network share)
-    #[arg(long, default_value = "scout.db")]
+    #[arg(long, default_value = "locsamp.db")]
     db: PathBuf,
 
     #[command(subcommand)]
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_add_root() {
-        let args = vec!["scout", "add-root", "/path/to/samples"];
+        let args = vec!["locsamp-cli", "add-root", "/path/to/samples"];
         let cli = Cli::try_parse_from(args).expect("parse add-root");
         match cli.cmd {
             Cmd::AddRoot { path } => {
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_scan() {
-        let args = vec!["scout", "scan", "42", "--focus", "drums/kicks"];
+        let args = vec!["locsamp-cli", "scan", "42", "--focus", "drums/kicks"];
         let cli = Cli::try_parse_from(args).expect("parse scan");
         match cli.cmd {
             Cmd::Scan { root_id, focus } => {
@@ -234,7 +234,7 @@ mod tests {
     #[test]
     fn test_cli_parsing_search() {
         let args = vec![
-            "scout", "search", "kick",
+            "locsamp-cli", "search", "kick",
             "--exts", "wav",
             "--exts", "mp3",
             "--bpm-min", "120.0",
@@ -263,23 +263,23 @@ mod tests {
 
     #[test]
     fn test_cli_parsing_tag_ops() {
-        let cli = Cli::try_parse_from(vec!["scout", "show", "7"]).unwrap();
+        let cli = Cli::try_parse_from(vec!["locsamp-cli", "show", "7"]).unwrap();
         assert!(matches!(cli.cmd, Cmd::Show { file_id: 7 }));
 
-        let cli = Cli::try_parse_from(vec!["scout", "tag", "7", "808"]).unwrap();
+        let cli = Cli::try_parse_from(vec!["locsamp-cli", "tag", "7", "808"]).unwrap();
         assert!(matches!(cli.cmd, Cmd::Tag { file_id: 7, name } if name == "808"));
 
-        let cli = Cli::try_parse_from(vec!["scout", "dismiss", "7", "3"]).unwrap();
+        let cli = Cli::try_parse_from(vec!["locsamp-cli", "dismiss", "7", "3"]).unwrap();
         assert!(matches!(cli.cmd, Cmd::Dismiss { file_id: 7, tag_id: 3 }));
 
-        let cli = Cli::try_parse_from(vec!["scout", "confirm", "7", "3"]).unwrap();
+        let cli = Cli::try_parse_from(vec!["locsamp-cli", "confirm", "7", "3"]).unwrap();
         assert!(matches!(cli.cmd, Cmd::Confirm { file_id: 7, tag_id: 3 }));
     }
 
     #[test]
     fn test_cli_parsing_retag_and_import() {
         let cli = Cli::try_parse_from(vec![
-            "scout", "retag", "1",
+            "locsamp-cli", "retag", "1",
             "--rules", "custom_rules.toml",
         ]).unwrap();
         match cli.cmd {
@@ -291,7 +291,7 @@ mod tests {
         }
 
         let cli = Cli::try_parse_from(vec![
-            "scout", "import-adsr", "adsr.db",
+            "locsamp-cli", "import-adsr", "adsr.db",
             "--path-map", "X:/=Y:/",
         ]).unwrap();
         match cli.cmd {
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_tag_lifecycle_and_non_resurrection() {
-        let db_file = std::env::temp_dir().join(format!("scout_test_cli_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let db_file = std::env::temp_dir().join(format!("locsamp_test_cli_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         let db = scout_db::open(&db_file).expect("open db");
 
         // Insert a dummy root and file

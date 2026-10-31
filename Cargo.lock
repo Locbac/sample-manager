@@ -2411,6 +2411,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "locsamp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "crossbeam",
+ "drag",
+ "eframe",
+ "egui_extras",
+ "raw-window-handle",
+ "rfd",
+ "rusqlite",
+ "scout-audio",
+ "scout-db",
+ "scout-embedded",
+ "scout-import-adsr",
+ "scout-scanner",
+ "scout-search",
+ "scout-tagging",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "locsamp-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossbeam",
+ "rusqlite",
+ "scout-audio",
+ "scout-db",
+ "scout-embedded",
+ "scout-import-adsr",
+ "scout-scanner",
+ "scout-search",
+ "scout-tagging",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lofty"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3814,27 +3858,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "scout-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossbeam",
- "rusqlite",
- "scout-audio",
- "scout-db",
- "scout-embedded",
- "scout-import-adsr",
- "scout-scanner",
- "scout-search",
- "scout-tagging",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "scout-db"
 version = "0.1.0"
 dependencies = [
@@ -3849,29 +3872,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lofty",
-]
-
-[[package]]
-name = "scout-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "crossbeam",
- "drag",
- "eframe",
- "egui_extras",
- "raw-window-handle",
- "rfd",
- "rusqlite",
- "scout-audio",
- "scout-db",
- "scout-embedded",
- "scout-import-adsr",
- "scout-scanner",
- "scout-search",
- "scout-tagging",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

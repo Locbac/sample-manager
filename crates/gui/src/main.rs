@@ -1028,7 +1028,7 @@ impl SampleManagerApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             // Logo / Branding
-            ui.label(egui::RichText::new("SCOUT").size(15.0).strong().color(Color32::WHITE));
+            ui.label(egui::RichText::new("LOCSAMP").size(15.0).strong().color(Color32::WHITE));
             ui.label(egui::RichText::new("SAMPLE MANAGER").size(11.0).color(Color32::from_rgb(180, 180, 180)));
 
             ui.separator();
@@ -2154,7 +2154,7 @@ impl SampleManagerApp {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
-                    ui.heading("Scout Vim Navigation");
+                    ui.heading("LocSamp Vim Navigation");
                     ui.separator();
                     ui.label(egui::RichText::new("/            - Focus Search Box").strong());
                     ui.label(egui::RichText::new("<Tab> / <Esc> - Switch focus to Sample List").strong());
@@ -2288,18 +2288,18 @@ fn main() -> eframe::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let db_path = PathBuf::from("scout.db");
+    let db_path = PathBuf::from("locsamp.db");
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("SCOUT — Sample Library Manager")
+            .with_title("LocSamp — Sample Library Manager")
             .with_inner_size([1180.0, 750.0])
             .with_min_inner_size([820.0, 520.0]),
         ..Default::default()
     };
 
     eframe::run_native(
-        "scout-gui",
+        "locsamp",
         native_options,
         Box::new(move |cc| {
             let handle = cc.window_handle().ok().map(|h| StoredWindowHandle(h.as_raw()));

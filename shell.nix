@@ -25,7 +25,7 @@ let
   ];
 in
 pkgs.mkShell {
-  name = "scout-dev";
+  name = "locsamp-dev";
 
   nativeBuildInputs = with pkgs; [
     pkg-config

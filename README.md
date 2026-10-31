@@ -1,4 +1,4 @@
-# Scout
+# LocSamp
 
 Fast, local sample library manager for music producers and sound designers.
 
@@ -9,11 +9,11 @@ Fast, local sample library manager for music producers and sound designers.
 [![Nix](https://img.shields.io/badge/nix-flake_%2B_shell-blueviolet.svg?style=flat-square&logo=nixos)](flake.nix)
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
 
-Scout is an open source desktop sample browser written in Rust. It indexes your audio samples into an embedded SQLite database, detects BPM and musical keys from filenames, and gives you keyboard-first navigation and instant playback without cloud accounts, subscriptions, or heavy web frameworks.
+LocSamp is an open source desktop sample browser written in Rust. It indexes your audio samples into an embedded SQLite database, detects BPM and musical keys from filenames, and gives you keyboard-first navigation and instant playback without cloud accounts, subscriptions, or heavy web frameworks.
 
 ---
 
-## Why Scout
+## Why LocSamp
 
 - **Non-blocking playback**: Background streaming decoder (Symphonia + CPAL) starts playback immediately without UI stutter, even on multi-minute stems or 100MB files.
 - **Automatic key and BPM detection**: Extracts tempo, pitch class, and Camelot wheel notation from filenames and folder structures. Distinguishes loops from one-shots.
@@ -27,7 +27,7 @@ Scout is an open source desktop sample browser written in Rust. It indexes your 
 
 ## Quickstart
 
-You need a Rust toolchain installed to build Scout from source.
+You need a Rust toolchain installed to build LocSamp from source.
 
 ### macOS
 
@@ -36,12 +36,16 @@ You need a Rust toolchain installed to build Scout from source.
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    source "$HOME/.cargo/env"
    ```
-2. Run Scout:
+2. Run LocSamp:
    ```bash
-   cargo run --release --bin scout-gui
+   cargo run --release --bin locsamp
    ```
 
-To build a standalone release binary, run `cargo build --release --bin scout-gui`. The executable is produced at `target/release/scout-gui`.
+To build a standalone macOS `.app` bundle you can drag to `/Applications`, run:
+```bash
+./scripts/build-macos-app.sh
+```
+This generates `dist/LocSamp.app`.
 
 ---
 
@@ -50,7 +54,7 @@ To build a standalone release binary, run `cargo build --release --bin scout-gui
 1. Install Rust via the installer at [rustup.rs](https://rustup.rs/) (including the MSVC C++ build tools if prompted).
 2. Open PowerShell or Windows Terminal and run:
    ```powershell
-   cargo run --release --bin scout-gui
+   cargo run --release --bin locsamp
    ```
 
 ---
@@ -70,11 +74,11 @@ To build a standalone release binary, run `cargo build --release --bin scout-gui
      ```bash
      sudo pacman -S base-devel alsa-lib
      ```
-2. Install Rust and run Scout:
+2. Install Rust and run LocSamp:
    ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    source "$HOME/.cargo/env"
-   cargo run --release --bin scout-gui
+   cargo run --release --bin locsamp
    ```
 
 ---
@@ -91,9 +95,9 @@ nix develop
 nix-shell
 ```
 
-Then run Scout inside the shell:
+Then run LocSamp inside the shell:
 ```bash
-cargo run --release --bin scout-gui
+cargo run --release --bin locsamp
 ```
 
 ---
@@ -118,7 +122,7 @@ cargo run --release --bin scout-gui
 
 ## Tagging taxonomy and ADSR analysis
 
-To provide automatic categorization out of the box, Scout includes a clean-room implementation of the taxonomy patterns found in ADSR Sample Manager:
+To provide automatic categorization out of the box, LocSamp includes a clean-room implementation of the taxonomy patterns found in ADSR Sample Manager:
 
 1. **Taxonomy dictionary**:
    Includes rules for 38 genres, 24 drum types, 24 instruments, 48 character descriptors, and 35 sound FX types.
@@ -156,38 +160,12 @@ sample-manager/
 │   ├── tagging/      # Lexical rule engine, multi-word n-grams, and key/BPM extractors
 │   ├── search/       # SQLite FTS5 query generator and filter builder
 │   ├── import-adsr/  # Importer for existing ADSR Sample Manager databases
-│   ├── gui/          # egui + wgpu desktop interface
-│   └── cli/          # Headless CLI for scripting and maintenance
+│   ├── gui/          # egui + wgpu desktop interface (locsamp binary)
+│   └── cli/          # Headless CLI for scripting and maintenance (locsamp-cli)
 ├── Cargo.toml        # Workspace manifest with release audio optimization profile
 ├── TODO.md           # Roadmap and planned features
 └── README.md
 ```
-
----
-
-## Building releases for all platforms
-
-If you want to compile release binaries manually on your local system:
-
-- **macOS (Universal Binary for both ARM64 and Intel)**:
-  ```bash
-  rustup target add aarch64-apple-darwin x86_64-apple-darwin
-  cargo build --release --target aarch64-apple-darwin --bin scout-gui
-  cargo build --release --target x86_64-apple-darwin --bin scout-gui
-  lipo -create -output scout-gui \
-    target/aarch64-apple-darwin/release/scout-gui \
-    target/x86_64-apple-darwin/release/scout-gui
-  ```
-
-- **Windows (x86_64)**:
-  ```powershell
-  cargo build --release --bin scout-gui
-  ```
-
-- **Linux (x86_64 or ARM64)**:
-  ```bash
-  cargo build --release --bin scout-gui
-  ```
 
 ---
 

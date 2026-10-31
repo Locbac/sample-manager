@@ -1,5 +1,5 @@
 {
-  description = "Scout — Fast, local sample library manager";
+  description = "LocSamp — Fast, local sample library manager";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -38,7 +38,7 @@
       in
       {
         devShells.default = pkgs.mkShell {
-          name = "scout-dev";
+          name = "locsamp-dev";
 
           nativeBuildInputs = with pkgs; [
             pkg-config

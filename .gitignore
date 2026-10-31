@@ -13,6 +13,8 @@ spikes/**/target/
 *.sqlite
 *.sqlite3
 scout.db
+locsamp.db
+dist/
 
 # Secrets & Environment variables
 .env
