@@ -51,6 +51,13 @@ enum FocusArea {
     SampleList,
 }
 
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ViewMode {
+    Library,
+    Randomize,
+    Recents,
+}
+
 struct SampleManagerApp {
     db_path: PathBuf,
     db: Db,
@@ -84,7 +91,9 @@ struct SampleManagerApp {
     file_rows: Vec<FileRow>,
     total_results: i64,
     selected_row_index: Option<usize>,
-    is_single_random_view: bool,
+    view_mode: ViewMode,
+    randomize_rows: Vec<FileRow>,
+    session_recents: Vec<FileRow>,
 
     // Selected sample metadata
     selected_file_tags: Vec<String>,
@@ -198,7 +207,9 @@ impl SampleManagerApp {
             file_rows: Vec::new(),
             total_results: 0,
             selected_row_index: None,
-            is_single_random_view: false,
+            view_mode: ViewMode::Library,
+            randomize_rows: Vec::new(),
+            session_recents: Vec::new(),
             selected_file_tags: Vec::new(),
             selected_full_path: None,
             selected_sample_info: None,
@@ -310,7 +321,7 @@ impl SampleManagerApp {
     }
 
     fn run_query(&mut self) {
-        self.is_single_random_view = false;
+        self.view_mode = ViewMode::Library;
         let cur_id = self.selected_row_index.and_then(|idx| self.file_rows.get(idx).map(|r| r.id));
         let query = self.build_search_query(500, 0);
 
@@ -326,7 +337,7 @@ impl SampleManagerApp {
     }
 
     fn load_more_rows(&mut self) {
-        if self.is_single_random_view || (self.file_rows.len() as i64) >= self.total_results {
+        if self.view_mode != ViewMode::Library || (self.file_rows.len() as i64) >= self.total_results {
             return;
         }
         let offset = self.file_rows.len() as u32;
@@ -342,12 +353,37 @@ impl SampleManagerApp {
         }
     }
 
+    fn record_recent(&mut self, row: FileRow) {
+        if let Some(last) = self.session_recents.last() {
+            if last.id == row.id {
+                return;
+            }
+        }
+        self.session_recents.push(row);
+        if self.session_recents.len() > 1000 {
+            self.session_recents.remove(0);
+        }
+    }
+
+    fn open_recents(&mut self) {
+        self.view_mode = ViewMode::Recents;
+        self.file_rows = self.session_recents.clone();
+        if !self.file_rows.is_empty() {
+            let last_idx = self.file_rows.len() - 1;
+            self.selected_row_index = Some(last_idx);
+            self.scroll_to_row = Some(last_idx);
+        } else {
+            self.selected_row_index = None;
+        }
+    }
+
     fn select_sample(&mut self, index: usize) {
         if index >= self.file_rows.len() {
             return;
         }
         self.selected_row_index = Some(index);
-        let row = &self.file_rows[index];
+        let row = self.file_rows[index].clone();
+        self.record_recent(row.clone());
 
         // Default loop setting: ON for loops, OFF for one-shots
         let is_loop = row.is_loop.unwrap_or_else(|| {
@@ -516,6 +552,16 @@ impl SampleManagerApp {
                 row.favorite = new_fav;
             }
         }
+        for row in &mut self.randomize_rows {
+            if row.id == file_id {
+                row.favorite = new_fav;
+            }
+        }
+        for row in &mut self.session_recents {
+            if row.id == file_id {
+                row.favorite = new_fav;
+            }
+        }
 
         if self.filter_favorite {
             self.run_query();
@@ -547,6 +593,11 @@ impl SampleManagerApp {
             return;
         }
 
+        if self.view_mode != ViewMode::Randomize {
+            self.randomize_rows.clear();
+            self.view_mode = ViewMode::Randomize;
+        }
+
         let target_offset = if self.total_results == 1 {
             0
         } else {
@@ -555,10 +606,8 @@ impl SampleManagerApp {
                 .map(|d| d.as_nanos())
                 .unwrap_or(42);
             let mut x = (nanos as u64).wrapping_add(0x9E3779B97F4A7C15);
-            if self.is_single_random_view {
-                if let Some(cur_row) = self.file_rows.first() {
-                    x = x.wrapping_add((cur_row.id as u64).wrapping_mul(0xC6A4A7935BD1E995));
-                }
+            if let Some(cur_row) = self.randomize_rows.last() {
+                x = x.wrapping_add((cur_row.id as u64).wrapping_mul(0xC6A4A7935BD1E995));
             }
             x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
             x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
@@ -570,15 +619,20 @@ impl SampleManagerApp {
         if let Ok(rows) = scout_search::search(&self.db.conn, &query) {
             if let Some(row) = rows.into_iter().next() {
                 self.total_results = row.total;
-                self.file_rows = vec![row];
-                self.is_single_random_view = true;
-                self.select_sample(0);
-                self.scroll_to_row = Some(0);
+                self.randomize_rows.push(row.clone());
+                self.record_recent(row.clone());
+                self.file_rows = self.randomize_rows.clone();
+                let new_idx = self.file_rows.len() - 1;
+                self.select_sample(new_idx);
+                self.scroll_to_row = Some(new_idx);
                 if let Some(path) = self.selected_full_path.clone() {
                     self.load_and_play(&path);
                 }
                 self.status_toast = Some((
-                    format!("Random sample #{}/{}", target_offset + 1, self.total_results),
+                    format!(
+                        "Randomized sample ({} in random list)",
+                        self.randomize_rows.len()
+                    ),
                     Instant::now(),
                 ));
             }
@@ -867,14 +921,13 @@ impl SampleManagerApp {
             }
         }
 
-        // Global Escape key returns focus to SampleList or exits single random view
+        // Global Escape key returns focus to SampleList or exits Randomize/Recents view
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.is_single_random_view && self.focus_area == FocusArea::SampleList {
-                self.is_single_random_view = false;
+            if self.view_mode != ViewMode::Library {
+                self.view_mode = ViewMode::Library;
                 self.run_query();
-            } else {
-                self.focus_area = FocusArea::SampleList;
             }
+            self.focus_area = FocusArea::SampleList;
         }
 
         if self.focus_area == FocusArea::SampleList {
@@ -890,7 +943,7 @@ impl SampleManagerApp {
                 if cur + 1 < self.file_rows.len() {
                     self.select_sample(cur + 1);
                     self.scroll_to_row = Some(cur + 1);
-                } else if !self.is_single_random_view && (self.file_rows.len() as i64) < self.total_results {
+                } else if self.view_mode == ViewMode::Library && (self.file_rows.len() as i64) < self.total_results {
                     self.load_more_rows();
                     if cur + 1 < self.file_rows.len() {
                         self.select_sample(cur + 1);
@@ -925,8 +978,11 @@ impl SampleManagerApp {
                 self.restart_play();
             }
 
-            // 'r': randomize and audition random sample from current results
-            if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+            // 'R' / Shift+R: session recents; 'r': randomize sample
+            let shift_r = ctx.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.shift);
+            if shift_r {
+                self.open_recents();
+            } else if ctx.input(|i| i.key_pressed(egui::Key::R)) {
                 self.randomize_sample();
             }
 
@@ -1069,8 +1125,12 @@ impl SampleManagerApp {
                     self.toggle_play();
                     ui.close();
                 }
-                if ui.button("Random Sample (R)").clicked() {
+                if ui.button("Random Sample (r)").clicked() {
                     self.randomize_sample();
+                    ui.close();
+                }
+                if ui.button("Session Recents (Shift+R)").clicked() {
+                    self.open_recents();
                     ui.close();
                 }
                 if ui.button("Stop").clicked() {
@@ -1131,6 +1191,12 @@ impl SampleManagerApp {
             }
             if search_resp.has_focus() {
                 self.focus_area = FocusArea::SearchBox;
+                if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    search_resp.surrender_focus();
+                    self.focus_area = FocusArea::SampleList;
+                }
+            } else if !self.request_search_focus {
+                self.focus_area = FocusArea::SampleList;
             }
             if search_resp.changed() {
                 self.run_query();
@@ -1213,9 +1279,23 @@ impl SampleManagerApp {
                 self.run_query();
             }
 
-            // Random discovery with guaranteed scrolling to selection
-            if ui.button("[RANDOM] (R)").on_hover_text("Audition a random sample from current results (Hotkey: R)").clicked() {
+            // Random discovery with accumulating results
+            if ui.button("[RANDOM] (r)").on_hover_text("Audition a random sample from current results (Hotkey: r)").clicked() {
                 self.randomize_sample();
+            }
+
+            let recents_label = format!("[RECENTS ({})] (Shift+R)", self.session_recents.len());
+            let recents_active = self.view_mode == ViewMode::Recents;
+            if ui.selectable_label(recents_active, recents_label)
+                .on_hover_text("View samples auditioned/randomized this session (Hotkey: Shift+R)")
+                .clicked()
+            {
+                if recents_active {
+                    self.view_mode = ViewMode::Library;
+                    self.run_query();
+                } else {
+                    self.open_recents();
+                }
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1498,9 +1578,17 @@ impl SampleManagerApp {
             .id_salt("sidebar_libraries_scroll")
             .max_height(140.0)
             .show(ui, |ui| {
-                let all_libs = ui.selectable_label(self.selected_root.is_none(), "All Libraries");
+                let all_libs = ui.selectable_label(self.selected_root.is_none() && self.view_mode == ViewMode::Library, "All Libraries");
                 if all_libs.clicked() {
                     clear_root = true;
+                    self.view_mode = ViewMode::Library;
+                }
+
+                let recents_label = format!(":: 🕒 Recents ({})", self.session_recents.len());
+                let recents_btn = ui.selectable_label(self.view_mode == ViewMode::Recents, recents_label)
+                    .on_hover_text("View samples auditioned/randomized this session (Shift+R)");
+                if recents_btn.clicked() {
+                    self.open_recents();
                 }
 
                 for (rid, path, count) in &roots_clone {
@@ -1658,33 +1746,66 @@ impl SampleManagerApp {
     fn render_central_table(&mut self, ui: &mut egui::Ui) {
         // Table Action & Drag Export Header
         ui.horizontal(|ui| {
-            if self.is_single_random_view {
-                ui.label(
-                    egui::RichText::new(format!("Random sample (1 of {} total)", self.total_results))
+            match self.view_mode {
+                ViewMode::Randomize => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Randomize view: {} samples (from {} total)",
+                            self.randomize_rows.len(),
+                            self.total_results
+                        ))
                         .size(11.5)
                         .strong()
                         .color(Color32::from_rgb(255, 215, 0)),
-                );
-                if ui
-                    .button(egui::RichText::new("[SHOW ALL RESULTS]").strong().color(Color32::WHITE))
-                    .on_hover_text("Return to full sample list (or press Esc)")
-                    .clicked()
-                {
-                    self.is_single_random_view = false;
-                    self.run_query();
+                    );
+                    if ui
+                        .button(egui::RichText::new("[SHOW ALL RESULTS]").strong().color(Color32::WHITE))
+                        .on_hover_text("Return to full sample list (or press Esc)")
+                        .clicked()
+                    {
+                        self.view_mode = ViewMode::Library;
+                        self.run_query();
+                    }
                 }
-            } else {
-                let count_text = if (self.file_rows.len() as i64) < self.total_results {
-                    format!("Showing {} of {} samples (scroll for more)", self.file_rows.len(), self.total_results)
-                } else {
-                    format!("Showing {} of {} samples", self.file_rows.len(), self.total_results)
-                };
-                ui.label(
-                    egui::RichText::new(count_text)
+                ViewMode::Recents => {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Session Recents: {} samples",
+                            self.session_recents.len()
+                        ))
                         .size(11.5)
                         .strong()
-                        .color(Color32::WHITE),
-                );
+                        .color(Color32::from_rgb(130, 200, 255)),
+                    );
+                    if ui
+                        .button(egui::RichText::new("[SHOW ALL RESULTS]").strong().color(Color32::WHITE))
+                        .on_hover_text("Return to full sample list (or press Esc)")
+                        .clicked()
+                    {
+                        self.view_mode = ViewMode::Library;
+                        self.run_query();
+                    }
+                    if !self.session_recents.is_empty() {
+                        if ui.button("[CLEAR RECENTS]").on_hover_text("Clear in-memory session recents history").clicked() {
+                            self.session_recents.clear();
+                            self.file_rows.clear();
+                            self.selected_row_index = None;
+                        }
+                    }
+                }
+                ViewMode::Library => {
+                    let count_text = if (self.file_rows.len() as i64) < self.total_results {
+                        format!("Showing {} of {} samples (scroll for more)", self.file_rows.len(), self.total_results)
+                    } else {
+                        format!("Showing {} of {} samples", self.file_rows.len(), self.total_results)
+                    };
+                    ui.label(
+                        egui::RichText::new(count_text)
+                            .size(11.5)
+                            .strong()
+                            .color(Color32::WHITE),
+                    );
+                }
             }
 
             if let Some(path) = self.selected_full_path.clone() {
@@ -1814,7 +1935,7 @@ impl SampleManagerApp {
                 let num_rows = self.file_rows.len();
                 body.rows(24.0, num_rows, |mut row| {
                     let idx = row.index();
-                    if !self.is_single_random_view
+                    if self.view_mode == ViewMode::Library
                         && (self.file_rows.len() as i64) < self.total_results
                         && idx + 40 >= self.file_rows.len()
                     {
@@ -1989,6 +2110,7 @@ impl SampleManagerApp {
         }
 
         if let Some(idx) = sample_to_select {
+            self.focus_area = FocusArea::SampleList;
             self.select_sample(idx);
             if trigger_restart_play {
                 self.restart_play();
@@ -2281,7 +2403,9 @@ impl SampleManagerApp {
                     ui.label(egui::RichText::new("k / <Up>     - Move Up one sample").strong());
                     ui.label(egui::RichText::new("h            - Toggle Favorite [*]").strong());
                     ui.label(egui::RichText::new("l / <Space>  - Play / Pause audition").strong());
-                    ui.label(egui::RichText::new("r            - Randomize sample (audition random from results)").strong());
+                    ui.label(egui::RichText::new("r            - Randomize sample (accumulates in random view)").strong());
+                    ui.label(egui::RichText::new("R / Shift+r  - Session Recents (view samples auditioned this session)").strong());
+                    ui.label(egui::RichText::new("<Esc>        - Return to Library view / blur search").strong());
                     ui.label(egui::RichText::new("gg           - Jump to First sample").strong());
                     ui.label(egui::RichText::new("G            - Jump to Last sample").strong());
                     ui.label(egui::RichText::new("yp           - Yank Path (copies absolute path)").strong());
@@ -2394,9 +2518,12 @@ impl eframe::App for SampleManagerApp {
             });
 
         // Center Virtualized Sample Grid Table
-        egui::CentralPanel::default().show(ui, |ui| {
+        let central_resp = egui::CentralPanel::default().show(ui, |ui| {
             self.render_central_table(ui);
         });
+        if central_resp.response.interact(Sense::click()).clicked() {
+            self.focus_area = FocusArea::SampleList;
+        }
 
         self.render_modals(&ctx);
     }
@@ -2673,12 +2800,19 @@ mod tests {
         let selected_idx = app.selected_row_index.unwrap();
         assert_eq!(selected_idx, 0);
         assert_eq!(app.file_rows.len(), 1);
-        assert!(app.is_single_random_view);
+        assert_eq!(app.view_mode, ViewMode::Randomize);
+        assert_eq!(app.randomize_rows.len(), 1);
         assert_eq!(app.total_results, 2);
+
+        // Randomize again appends next sample to randomize view
+        app.randomize_sample();
+        assert_eq!(app.file_rows.len(), 2);
+        assert_eq!(app.randomize_rows.len(), 2);
+        assert_eq!(app.selected_row_index, Some(1));
 
         // run_query restores the full list
         app.run_query();
-        assert!(!app.is_single_random_view);
+        assert_eq!(app.view_mode, ViewMode::Library);
         assert_eq!(app.file_rows.len(), 2);
 
         let _ = std::fs::remove_file(&db_path);
@@ -2713,19 +2847,33 @@ mod tests {
         app.load_more_rows();
         assert_eq!(app.file_rows.len(), 600);
 
-        // Test randomize sample with single-sample view
+        // Test randomize sample with accumulating randomize view
         app.randomize_sample();
-        assert!(app.is_single_random_view);
+        assert_eq!(app.view_mode, ViewMode::Randomize);
         assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.randomize_rows.len(), 1);
+        assert_eq!(app.session_recents.len(), 1);
         assert_eq!(app.total_results, 600);
 
-        // load_more_rows should not load while in is_single_random_view
+        // Randomize again adds second sample to the view
+        app.randomize_sample();
+        assert_eq!(app.view_mode, ViewMode::Randomize);
+        assert_eq!(app.file_rows.len(), 2);
+        assert_eq!(app.randomize_rows.len(), 2);
+        assert_eq!(app.session_recents.len(), 2);
+
+        // load_more_rows should not load while in Randomize view
         app.load_more_rows();
-        assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.file_rows.len(), 2);
+
+        // Test session recents view
+        app.open_recents();
+        assert_eq!(app.view_mode, ViewMode::Recents);
+        assert_eq!(app.file_rows.len(), 2);
 
         // Restoring full list
         app.run_query();
-        assert!(!app.is_single_random_view);
+        assert_eq!(app.view_mode, ViewMode::Library);
         assert_eq!(app.file_rows.len(), 500);
 
         let _ = std::fs::remove_file(&db_path);

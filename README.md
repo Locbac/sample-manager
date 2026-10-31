@@ -106,14 +106,15 @@ cargo run --release --bin locsamp
 
 | Shortcut | Action | Description |
 | :--- | :--- | :--- |
-| <kbd>r</kbd> | Random sample | Auditions a random sample from the current filtered results |
+| <kbd>r</kbd> | Random sample | Auditions a random sample, accumulating in an isolated discovery view |
+| <kbd>R</kbd> / <kbd>Shift</kbd>+<kbd>r</kbd> | Session Recents | Opens in-memory recents view of all samples auditioned this session |
 | <kbd>l</kbd> | Retrigger | Plays current sample from the beginning |
 | <kbd>Space</kbd> / <kbd>Enter</kbd> | Play / Pause | Toggles playback |
 | <kbd>j</kbd> / <kbd>↓</kbd> | Next | Moves to the next sample |
 | <kbd>k</kbd> / <kbd>↑</kbd> | Previous | Moves to the previous sample |
 | <kbd>h</kbd> | Favorite | Toggles favorite status |
 | <kbd>/</kbd> | Search | Focuses search bar (supports queries like `kick`, `140bpm`, `F# min`) |
-| <kbd>Esc</kbd> / <kbd>Tab</kbd> | Focus list | Returns focus to sample list from search |
+| <kbd>Esc</kbd> / <kbd>Tab</kbd> | Focus list / Exit view | Returns focus to sample list; exits Random/Recents back to full library |
 | <kbd>gg</kbd> / <kbd>G</kbd> | First / Last | Jumps to start or end of list |
 | <kbd>yy</kbd> | Yank file | Copies sample file path to clipboard |
 | **Scroll wheel** | Pitch / Volume | Hover over pitch or volume controls and scroll to adjust |
