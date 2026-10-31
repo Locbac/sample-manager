@@ -6,6 +6,7 @@ Fast, local sample library manager for music producers and sound designers.
 [![Platform](https://img.shields.io/badge/platform-macOS_%7C_Windows_%7C_Linux-blue.svg?style=flat-square)](https://github.com/locbac/sample-manager)
 [![Audio Engine](https://img.shields.io/badge/audio-Symphonia_%2B_CPAL-purple.svg?style=flat-square)](https://github.com/pdeljanov/Symphonia)
 [![GUI](https://img.shields.io/badge/gui-egui_%2B_wgpu-red.svg?style=flat-square)](https://github.com/emilk/egui)
+[![Nix](https://img.shields.io/badge/nix-flake_%2B_shell-blueviolet.svg?style=flat-square&logo=nixos)](flake.nix)
 [![License](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE)
 
 Scout is an open source desktop sample browser written in Rust. It indexes your audio samples into an embedded SQLite database, detects BPM and musical keys from filenames, and gives you keyboard-first navigation and instant playback without cloud accounts, subscriptions, or heavy web frameworks.
@@ -78,6 +79,25 @@ To build a standalone release binary, run `cargo build --release --bin scout-gui
 
 ---
 
+### Nix
+
+If you use Nix or NixOS, enter the pre-configured developer environment with all audio and graphical dependencies:
+
+```bash
+# Using Nix flakes
+nix develop
+
+# Using classic nix-shell
+nix-shell
+```
+
+Then run Scout inside the shell:
+```bash
+cargo run --release --bin scout-gui
+```
+
+---
+
 ## Keyboard shortcuts
 
 | Shortcut | Action | Description |
@@ -142,6 +162,54 @@ sample-manager/
 ├── TODO.md           # Roadmap and planned features
 └── README.md
 ```
+
+---
+
+## Building releases for all platforms
+
+Scout includes an automated GitHub Actions release workflow (`.github/workflows/release.yml`) that compiles binaries across all supported operating systems and architectures.
+
+### Automated GitHub Release (Recommended)
+
+To create a new release and build binaries for all targets:
+
+1. Tag the release:
+   ```bash
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+2. GitHub Actions will automatically spin up native runners and build:
+   - **macOS Universal Binary** (`scout-macos-universal.zip`): Dual-architecture executable supporting both Apple Silicon (ARM64) and Intel (x86_64).
+   - **Windows x86_64** (`scout-windows-x86_64.zip`): `scout-gui.exe` and `scout.exe`.
+   - **Linux x86_64** (`scout-linux-x86_64.tar.gz`).
+   - **Linux ARM64** (`scout-linux-arm64.tar.gz`).
+   - **Checksums** (`SHA256SUMS.txt`).
+
+A release will be automatically drafted and published on your GitHub repository with all binaries attached. You can also trigger this manually from the **Actions** tab on GitHub via `workflow_dispatch`.
+
+### Building locally
+
+If you want to compile release binaries manually on your local system:
+
+- **macOS (Universal Binary for both ARM64 and Intel)**:
+  ```bash
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
+  cargo build --release --target aarch64-apple-darwin --bin scout-gui
+  cargo build --release --target x86_64-apple-darwin --bin scout-gui
+  lipo -create -output scout-gui \
+    target/aarch64-apple-darwin/release/scout-gui \
+    target/x86_64-apple-darwin/release/scout-gui
+  ```
+
+- **Windows (x86_64)**:
+  ```powershell
+  cargo build --release --bin scout-gui
+  ```
+
+- **Linux (x86_64 or ARM64)**:
+  ```bash
+  cargo build --release --bin scout-gui
+  ```
 
 ---
 

@@ -1,0 +1,185 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build macOS (Universal Binary)
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build Apple Silicon (ARM64)
+        run: |
+          cargo build --release --target aarch64-apple-darwin --bin scout-gui --bin scout
+
+      - name: Build Intel (x86_64)
+        run: |
+          cargo build --release --target x86_64-apple-darwin --bin scout-gui --bin scout
+
+      - name: Create Universal Binaries
+        run: |
+          mkdir -p dist/scout-macos
+          lipo -create -output dist/scout-macos/scout-gui \
+            target/aarch64-apple-darwin/release/scout-gui \
+            target/x86_64-apple-darwin/release/scout-gui
+          lipo -create -output dist/scout-macos/scout \
+            target/aarch64-apple-darwin/release/scout \
+            target/x86_64-apple-darwin/release/scout
+          chmod +x dist/scout-macos/scout*
+          cp README.md LICENSE dist/scout-macos/
+          cd dist && zip -r scout-macos-universal.zip scout-macos
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-macos-universal
+          path: dist/scout-macos-universal.zip
+
+  build-windows:
+    name: Build Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Windows Binaries
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc --bin scout-gui --bin scout
+
+      - name: Package Windows Release
+        shell: bash
+        run: |
+          mkdir -p dist/scout-windows
+          cp target/x86_64-pc-windows-msvc/release/scout-gui.exe dist/scout-windows/
+          cp target/x86_64-pc-windows-msvc/release/scout.exe dist/scout-windows/
+          cp README.md LICENSE dist/scout-windows/
+          cd dist && 7z a scout-windows-x86_64.zip scout-windows
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-windows-x86_64
+          path: dist/scout-windows-x86_64.zip
+
+  build-linux-x86_64:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Linux x86_64 Binaries
+        run: |
+          cargo build --release --bin scout-gui --bin scout
+
+      - name: Package Linux x86_64 Release
+        run: |
+          mkdir -p dist/scout-linux-x86_64
+          cp target/release/scout-gui dist/scout-linux-x86_64/
+          cp target/release/scout dist/scout-linux-x86_64/
+          cp README.md LICENSE dist/scout-linux-x86_64/
+          chmod +x dist/scout-linux-x86_64/scout*
+          tar -czf dist/scout-linux-x86_64.tar.gz -C dist scout-linux-x86_64
+
+      - name: Upload Linux x86_64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-linux-x86_64
+          path: dist/scout-linux-x86_64.tar.gz
+
+  build-linux-arm64:
+    name: Build Linux (ARM64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Linux ARM64 Binaries
+        run: |
+          cargo build --release --bin scout-gui --bin scout
+
+      - name: Package Linux ARM64 Release
+        run: |
+          mkdir -p dist/scout-linux-arm64
+          cp target/release/scout-gui dist/scout-linux-arm64/
+          cp target/release/scout dist/scout-linux-arm64/
+          cp README.md LICENSE dist/scout-linux-arm64/
+          chmod +x dist/scout-linux-arm64/scout*
+          tar -czf dist/scout-linux-arm64.tar.gz -C dist scout-linux-arm64
+
+      - name: Upload Linux ARM64 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: scout-linux-arm64
+          path: dist/scout-linux-arm64.tar.gz
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-macos, build-windows, build-linux-x86_64, build-linux-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Compute SHA256 Checksums
+        run: |
+          cd release-artifacts
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name || github.ref_name }}
+          name: Scout ${{ github.event.inputs.tag_name || github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            release-artifacts/*
+          generate_release_notes: true
