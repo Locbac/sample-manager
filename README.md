@@ -137,6 +137,28 @@ To provide automatic categorization out of the box, LocSamp includes a clean-roo
 
 ---
 
+## Real-world indexing performance
+
+LocSamp is designed around minimal I/O overhead and fast lexical tokenization. In real-world testing on a producer library containing ~150 GB of audio (`151130364 Sample Packs/` via `du`):
+
+- **LocSamp (macOS SSD)**: Indexed and tagged the entire library in **~30 seconds**.
+- **ADSR Sample Manager (SSD)**: Took **~1 hour** on the same drive.
+- **ADSR Sample Manager (Windows HDD)**: Took **7 to 8 hours** scanning over mechanical storage.
+
+```text
+Full Library Scan (~150 GB / 151M blocks)
+─────────────────────────────────────────────────────────────────────────────
+LocSamp (SSD)               [  30s ]  █
+ADSR Sample Manager (SSD)   [ ~60m ]  ████████████████████
+ADSR Sample Manager (HDD)   [~450m ]  ███████████████████████████████████████
+─────────────────────────────────────────────────────────────────────────────
+Time (shorter is better)
+```
+
+Incremental rescans only evaluate newly added or modified files, checking existing index entries in milliseconds without re-reading audio files from disk.
+
+---
+
 ## Supported audio formats
 
 Decoded via [Symphonia](https://github.com/pdeljanov/Symphonia):
