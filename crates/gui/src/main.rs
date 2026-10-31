@@ -84,6 +84,7 @@ struct SampleManagerApp {
     file_rows: Vec<FileRow>,
     total_results: i64,
     selected_row_index: Option<usize>,
+    is_single_random_view: bool,
 
     // Selected sample metadata
     selected_file_tags: Vec<String>,
@@ -197,6 +198,7 @@ impl SampleManagerApp {
             file_rows: Vec::new(),
             total_results: 0,
             selected_row_index: None,
+            is_single_random_view: false,
             selected_file_tags: Vec::new(),
             selected_full_path: None,
             selected_sample_info: None,
@@ -283,11 +285,11 @@ impl SampleManagerApp {
         self.tags = tags;
     }
 
-    fn run_query(&mut self) {
+    fn build_search_query(&self, limit: u32, offset: u32) -> SearchQuery {
         let bpm_min = self.bpm_min.trim().parse::<f64>().ok();
         let bpm_max = self.bpm_max.trim().parse::<f64>().ok();
 
-        let query = SearchQuery {
+        SearchQuery {
             q: if self.search_text.trim().is_empty() {
                 None
             } else {
@@ -301,18 +303,41 @@ impl SampleManagerApp {
             favorites_only: self.filter_favorite,
             tags_include: self.selected_tags.iter().copied().collect(),
             sort: self.sort,
-            limit: 500,
-            offset: 0,
+            limit,
+            offset,
             ..Default::default()
-        };
+        }
+    }
+
+    fn run_query(&mut self) {
+        self.is_single_random_view = false;
+        let cur_id = self.selected_row_index.and_then(|idx| self.file_rows.get(idx).map(|r| r.id));
+        let query = self.build_search_query(500, 0);
 
         if let Ok(rows) = scout_search::search(&self.db.conn, &query) {
             self.total_results = rows.first().map(|r| r.total).unwrap_or(0);
             self.file_rows = rows;
-            if let Some(idx) = self.selected_row_index {
-                if idx >= self.file_rows.len() {
-                    self.selected_row_index = None;
-                }
+            if let Some(cid) = cur_id {
+                self.selected_row_index = self.file_rows.iter().position(|r| r.id == cid);
+            } else {
+                self.selected_row_index = None;
+            }
+        }
+    }
+
+    fn load_more_rows(&mut self) {
+        if self.is_single_random_view || (self.file_rows.len() as i64) >= self.total_results {
+            return;
+        }
+        let offset = self.file_rows.len() as u32;
+        let limit = 500;
+        let query = self.build_search_query(limit, offset);
+
+        if let Ok(mut next_rows) = scout_search::search(&self.db.conn, &query) {
+            if next_rows.is_empty() {
+                self.total_results = self.file_rows.len() as i64;
+            } else {
+                self.file_rows.append(&mut next_rows);
             }
         }
     }
@@ -479,12 +504,22 @@ impl SampleManagerApp {
             .query_row("SELECT 1 FROM favorites WHERE file_id = ?1", [file_id], |_| Ok(true))
             .unwrap_or(false);
 
+        let new_fav = !is_fav;
         if is_fav {
             let _ = self.db.conn.execute("DELETE FROM favorites WHERE file_id = ?1", [file_id]);
         } else {
             let _ = self.db.conn.execute("INSERT OR IGNORE INTO favorites(file_id) VALUES (?1)", [file_id]);
         }
-        self.run_query();
+
+        for row in &mut self.file_rows {
+            if row.id == file_id {
+                row.favorite = new_fav;
+            }
+        }
+
+        if self.filter_favorite {
+            self.run_query();
+        }
     }
 
     fn toggle_play(&mut self) {
@@ -508,29 +543,45 @@ impl SampleManagerApp {
     }
 
     fn randomize_sample(&mut self) {
-        if self.file_rows.is_empty() {
+        if self.total_results == 0 {
             return;
         }
-        let len = self.file_rows.len();
-        let target = if len == 1 {
+
+        let target_offset = if self.total_results == 1 {
             0
         } else {
             let nanos = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(42);
-            let mut rand_idx = ((nanos ^ (nanos >> 17) ^ (nanos << 13)) as usize) % len;
-            if let Some(cur) = self.selected_row_index {
-                if rand_idx == cur {
-                    rand_idx = (rand_idx + 1) % len;
+            let mut x = (nanos as u64).wrapping_add(0x9E3779B97F4A7C15);
+            if self.is_single_random_view {
+                if let Some(cur_row) = self.file_rows.first() {
+                    x = x.wrapping_add((cur_row.id as u64).wrapping_mul(0xC6A4A7935BD1E995));
                 }
             }
-            rand_idx
+            x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+            x ^= x >> 31;
+            (x % (self.total_results as u64)) as u32
         };
-        self.select_sample(target);
-        self.scroll_to_row = Some(target);
-        if let Some(path) = self.selected_full_path.clone() {
-            self.load_and_play(&path);
+
+        let query = self.build_search_query(1, target_offset);
+        if let Ok(rows) = scout_search::search(&self.db.conn, &query) {
+            if let Some(row) = rows.into_iter().next() {
+                self.total_results = row.total;
+                self.file_rows = vec![row];
+                self.is_single_random_view = true;
+                self.select_sample(0);
+                self.scroll_to_row = Some(0);
+                if let Some(path) = self.selected_full_path.clone() {
+                    self.load_and_play(&path);
+                }
+                self.status_toast = Some((
+                    format!("Random sample #{}/{}", target_offset + 1, self.total_results),
+                    Instant::now(),
+                ));
+            }
         }
     }
 
@@ -816,9 +867,14 @@ impl SampleManagerApp {
             }
         }
 
-        // Global Escape key returns focus to SampleList
+        // Global Escape key returns focus to SampleList or exits single random view
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.focus_area = FocusArea::SampleList;
+            if self.is_single_random_view && self.focus_area == FocusArea::SampleList {
+                self.is_single_random_view = false;
+                self.run_query();
+            } else {
+                self.focus_area = FocusArea::SampleList;
+            }
         }
 
         if self.focus_area == FocusArea::SampleList {
@@ -834,6 +890,12 @@ impl SampleManagerApp {
                 if cur + 1 < self.file_rows.len() {
                     self.select_sample(cur + 1);
                     self.scroll_to_row = Some(cur + 1);
+                } else if !self.is_single_random_view && (self.file_rows.len() as i64) < self.total_results {
+                    self.load_more_rows();
+                    if cur + 1 < self.file_rows.len() {
+                        self.select_sample(cur + 1);
+                        self.scroll_to_row = Some(cur + 1);
+                    }
                 } else if !self.file_rows.is_empty() && self.selected_row_index.is_none() {
                     self.select_sample(0);
                     self.scroll_to_row = Some(0);
@@ -1596,12 +1658,34 @@ impl SampleManagerApp {
     fn render_central_table(&mut self, ui: &mut egui::Ui) {
         // Table Action & Drag Export Header
         ui.horizontal(|ui| {
-            ui.label(
-                egui::RichText::new(format!("Showing {} of {} samples", self.file_rows.len(), self.total_results))
-                    .size(11.5)
-                    .strong()
-                    .color(Color32::WHITE),
-            );
+            if self.is_single_random_view {
+                ui.label(
+                    egui::RichText::new(format!("Random sample (1 of {} total)", self.total_results))
+                        .size(11.5)
+                        .strong()
+                        .color(Color32::from_rgb(255, 215, 0)),
+                );
+                if ui
+                    .button(egui::RichText::new("[SHOW ALL RESULTS]").strong().color(Color32::WHITE))
+                    .on_hover_text("Return to full sample list (or press Esc)")
+                    .clicked()
+                {
+                    self.is_single_random_view = false;
+                    self.run_query();
+                }
+            } else {
+                let count_text = if (self.file_rows.len() as i64) < self.total_results {
+                    format!("Showing {} of {} samples (scroll for more)", self.file_rows.len(), self.total_results)
+                } else {
+                    format!("Showing {} of {} samples", self.file_rows.len(), self.total_results)
+                };
+                ui.label(
+                    egui::RichText::new(count_text)
+                        .size(11.5)
+                        .strong()
+                        .color(Color32::WHITE),
+                );
+            }
 
             if let Some(path) = self.selected_full_path.clone() {
                 ui.separator();
@@ -1673,6 +1757,7 @@ impl SampleManagerApp {
         let mut trigger_reveal = false;
         let mut trigger_restart_play = false;
         let mut trigger_toggle_play = false;
+        let mut needs_load_more = false;
 
         table
             .header(24.0, |mut header| {
@@ -1729,6 +1814,12 @@ impl SampleManagerApp {
                 let num_rows = self.file_rows.len();
                 body.rows(24.0, num_rows, |mut row| {
                     let idx = row.index();
+                    if !self.is_single_random_view
+                        && (self.file_rows.len() as i64) < self.total_results
+                        && idx + 40 >= self.file_rows.len()
+                    {
+                        needs_load_more = true;
+                    }
                     let item = &self.file_rows[idx];
                     let is_selected = self.selected_row_index == Some(idx);
 
@@ -1891,6 +1982,11 @@ impl SampleManagerApp {
                     });
                 });
             });
+
+        if needs_load_more {
+            self.load_more_rows();
+            ui.ctx().request_repaint();
+        }
 
         if let Some(idx) = sample_to_select {
             self.select_sample(idx);
@@ -2575,7 +2671,62 @@ mod tests {
         app.randomize_sample();
         assert!(app.selected_row_index.is_some());
         let selected_idx = app.selected_row_index.unwrap();
-        assert!(selected_idx < app.file_rows.len());
+        assert_eq!(selected_idx, 0);
+        assert_eq!(app.file_rows.len(), 1);
+        assert!(app.is_single_random_view);
+        assert_eq!(app.total_results, 2);
+
+        // run_query restores the full list
+        app.run_query();
+        assert!(!app.is_single_random_view);
+        assert_eq!(app.file_rows.len(), 2);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_infinite_scroll_pagination() {
+        let db_path = std::env::temp_dir().join(format!("test_gui_pagination_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut app = SampleManagerApp::new(db_path.clone(), None);
+
+        app.db.conn.execute("INSERT INTO roots(id, path, enabled) VALUES (1, '/samples', 1)", []).unwrap();
+        // Insert 600 files
+        let tx = app.db.conn.transaction().unwrap();
+        for i in 1..=600 {
+            tx.execute(
+                "INSERT INTO files(id, root_id, rel_path, name, ext, size, mtime)
+                 VALUES (?1, 1, ?2, ?3, 'wav', 1024, 100)",
+                rusqlite::params![i, format!("sample_{i}.wav"), format!("sample_{i}.wav")],
+            ).unwrap();
+        }
+        tx.commit().unwrap();
+
+        app.run_query();
+        assert_eq!(app.total_results, 600);
+        assert_eq!(app.file_rows.len(), 500);
+
+        // Load next chunk
+        app.load_more_rows();
+        assert_eq!(app.file_rows.len(), 600);
+
+        // Calling load_more_rows when all loaded does not append duplicates
+        app.load_more_rows();
+        assert_eq!(app.file_rows.len(), 600);
+
+        // Test randomize sample with single-sample view
+        app.randomize_sample();
+        assert!(app.is_single_random_view);
+        assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.total_results, 600);
+
+        // load_more_rows should not load while in is_single_random_view
+        app.load_more_rows();
+        assert_eq!(app.file_rows.len(), 1);
+
+        // Restoring full list
+        app.run_query();
+        assert!(!app.is_single_random_view);
+        assert_eq!(app.file_rows.len(), 500);
 
         let _ = std::fs::remove_file(&db_path);
     }
