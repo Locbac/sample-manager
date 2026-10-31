@@ -21,6 +21,13 @@ mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}"
 echo "==> Copying binary into bundle..."
 if [[ -f "target/release/${BIN_NAME}" ]]; then
   cp "target/release/${BIN_NAME}" "${MACOS_DIR}/${BIN_NAME}"
+elif [[ -f "target/aarch64-apple-darwin/release/${BIN_NAME}" ]]; then
+  cp "target/aarch64-apple-darwin/release/${BIN_NAME}" "${MACOS_DIR}/${BIN_NAME}"
+elif [[ -f "target/x86_64-apple-darwin/release/${BIN_NAME}" ]]; then
+  cp "target/x86_64-apple-darwin/release/${BIN_NAME}" "${MACOS_DIR}/${BIN_NAME}"
+else
+  echo "Error: target/release/${BIN_NAME} was not found!" >&2
+  exit 1
 fi
 chmod +x "${MACOS_DIR}/${BIN_NAME}"
 
@@ -44,14 +51,14 @@ cat << 'EOF' > "${CONTENTS_DIR}/Info.plist"
     <string>0.1.0</string>
     <key>CFBundleExecutable</key>
     <string>locsamp</string>
-    <key>CFBundleIconFile</key>
-    <string>LocSamp</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
 </dict>
 </plist>
 EOF

@@ -129,8 +129,31 @@ struct SampleManagerApp {
 
 impl SampleManagerApp {
     fn new(db_path: PathBuf, window_handle: Option<StoredWindowHandle>) -> Self {
-        let canonical_db = std::fs::canonicalize(&db_path).unwrap_or(db_path.clone());
-        let mut db = scout_db::open(&canonical_db).expect("Failed to open or initialize Scout DB");
+        if let Some(parent) = db_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+        }
+
+        let canonical_db = std::fs::canonicalize(&db_path).unwrap_or_else(|_| db_path.clone());
+        let mut db = match scout_db::open(&canonical_db) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Warning: Failed to open DB at {:?}: {e}. Retrying with user data directory...", canonical_db);
+                let fallback = default_db_path();
+                if let Some(parent) = fallback.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match scout_db::open(&fallback) {
+                    Ok(d) => d,
+                    Err(e2) => {
+                        eprintln!("Warning: Failed to open fallback DB at {:?}: {e2}. Falling back to temp directory.", fallback);
+                        let temp = std::env::temp_dir().join(format!("locsamp_{}.db", std::process::id()));
+                        scout_db::open(&temp).expect("Failed to initialize temporary LocSamp database")
+                    }
+                }
+            }
+        };
 
         // Auto-tag any existing files if untagged
         let untagged_count: i64 = db
@@ -2283,12 +2306,58 @@ impl eframe::App for SampleManagerApp {
     }
 }
 
+fn default_db_path() -> PathBuf {
+    if let Ok(p) = std::env::var("LOCSAMP_DB") {
+        return PathBuf::from(p);
+    }
+
+    // 1. If locsamp.db exists in current working directory AND we have write permission, use it (dev mode)
+    let local = PathBuf::from("locsamp.db");
+    if local.exists() {
+        return local;
+    }
+
+    // 2. Standard application data directory:
+    // macOS: ~/Library/Application Support/LocSamp/locsamp.db
+    #[cfg(target_os = "macos")]
+    if let Some(home) = std::env::var_os("HOME") {
+        let app_dir = PathBuf::from(home).join("Library/Application Support/LocSamp");
+        if std::fs::create_dir_all(&app_dir).is_ok() {
+            return app_dir.join("locsamp.db");
+        }
+    }
+
+    // Windows: %APPDATA%/LocSamp/locsamp.db
+    #[cfg(target_os = "windows")]
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        let app_dir = PathBuf::from(appdata).join("LocSamp");
+        if std::fs::create_dir_all(&app_dir).is_ok() {
+            return app_dir.join("locsamp.db");
+        }
+    }
+
+    // Linux: ~/.local/share/locsamp/locsamp.db
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    if let Some(home) = std::env::var_os("HOME") {
+        let data_home = match std::env::var_os("XDG_DATA_HOME") {
+            Some(p) => PathBuf::from(p).join("locsamp"),
+            None => PathBuf::from(home).join(".local/share/locsamp"),
+        };
+        if std::fs::create_dir_all(&data_home).is_ok() {
+            return data_home.join("locsamp.db");
+        }
+    }
+
+    // Safe fallback if home dir or permissions fail
+    std::env::temp_dir().join("locsamp.db")
+}
+
 fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let db_path = PathBuf::from("locsamp.db");
+    let db_path = default_db_path();
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
