@@ -484,6 +484,33 @@ impl SampleManagerApp {
         }
     }
 
+    fn randomize_sample(&mut self) {
+        if self.file_rows.is_empty() {
+            return;
+        }
+        let len = self.file_rows.len();
+        let target = if len == 1 {
+            0
+        } else {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(42);
+            let mut rand_idx = ((nanos ^ (nanos >> 17) ^ (nanos << 13)) as usize) % len;
+            if let Some(cur) = self.selected_row_index {
+                if rand_idx == cur {
+                    rand_idx = (rand_idx + 1) % len;
+                }
+            }
+            rand_idx
+        };
+        self.select_sample(target);
+        self.scroll_to_row = Some(target);
+        if let Some(path) = self.selected_full_path.clone() {
+            self.load_and_play(&path);
+        }
+    }
+
     fn add_root_path(&mut self, path: &Path, start_scan: bool) -> Result<i64, String> {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         let s = canonical.to_string_lossy().to_string();
@@ -813,6 +840,11 @@ impl SampleManagerApp {
                 self.restart_play();
             }
 
+            // 'r': randomize and audition random sample from current results
+            if ctx.input(|i| i.key_pressed(egui::Key::R)) {
+                self.randomize_sample();
+            }
+
             // Spacebar or Enter: toggle play/pause
             if ctx.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter)) {
                 self.toggle_play();
@@ -950,6 +982,10 @@ impl SampleManagerApp {
             ui.menu_button("Playback", |ui| {
                 if ui.button("Play / Pause (Space / L)").clicked() {
                     self.toggle_play();
+                    ui.close();
+                }
+                if ui.button("Random Sample (R)").clicked() {
+                    self.randomize_sample();
                     ui.close();
                 }
                 if ui.button("Stop").clicked() {
@@ -1093,16 +1129,8 @@ impl SampleManagerApp {
             }
 
             // Random discovery with guaranteed scrolling to selection
-            if ui.button("[RANDOM]").on_hover_text("Audition a random sample from current results").clicked() {
-                if !self.file_rows.is_empty() {
-                    let nanos = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos())
-                        .unwrap_or(42);
-                    let rand_idx = ((nanos ^ (nanos >> 17) ^ (nanos << 13)) as usize) % self.file_rows.len();
-                    self.select_sample(rand_idx);
-                    self.scroll_to_row = Some(rand_idx);
-                }
+            if ui.button("[RANDOM] (R)").on_hover_text("Audition a random sample from current results (Hotkey: R)").clicked() {
+                self.randomize_sample();
             }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2134,6 +2162,7 @@ impl SampleManagerApp {
                     ui.label(egui::RichText::new("k / <Up>     - Move Up one sample").strong());
                     ui.label(egui::RichText::new("h            - Toggle Favorite [*]").strong());
                     ui.label(egui::RichText::new("l / <Space>  - Play / Pause audition").strong());
+                    ui.label(egui::RichText::new("r            - Randomize sample (audition random from results)").strong());
                     ui.label(egui::RichText::new("gg           - Jump to First sample").strong());
                     ui.label(egui::RichText::new("G            - Jump to Last sample").strong());
                     ui.label(egui::RichText::new("yp           - Yank Path (copies absolute path)").strong());
@@ -2469,6 +2498,15 @@ mod tests {
         app.run_query();
         assert_eq!(app.file_rows.len(), 1);
         assert_eq!(app.file_rows[0].name, "future_bass_lead_150bpm.wav");
+
+        // Test randomize sample
+        app.filter_loop = None;
+        app.run_query();
+        assert_eq!(app.file_rows.len(), 2);
+        app.randomize_sample();
+        assert!(app.selected_row_index.is_some());
+        let selected_idx = app.selected_row_index.unwrap();
+        assert!(selected_idx < app.file_rows.len());
 
         let _ = std::fs::remove_file(&db_path);
     }
