@@ -383,7 +383,9 @@ impl SampleManagerApp {
         }
         self.selected_row_index = Some(index);
         let row = self.file_rows[index].clone();
-        self.record_recent(row.clone());
+        if self.view_mode != ViewMode::Recents {
+            self.record_recent(row.clone());
+        }
 
         // Default loop setting: ON for loops, OFF for one-shots
         let is_loop = row.is_loop.unwrap_or_else(|| {
@@ -1171,7 +1173,7 @@ impl SampleManagerApp {
 
     fn render_top_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // Logo / Branding
             ui.label(egui::RichText::new("LOCSAMP").size(15.0).strong().color(Color32::WHITE));
             ui.label(egui::RichText::new("SAMPLE MANAGER").size(11.0).color(Color32::from_rgb(180, 180, 180)));
@@ -1182,7 +1184,7 @@ impl SampleManagerApp {
             ui.label("Search:");
             let search_edit = egui::TextEdit::singleline(&mut self.search_text)
                 .hint_text("Press / to search...")
-                .desired_width(190.0);
+                .desired_width(170.0);
             let search_resp = ui.add(search_edit);
 
             if self.request_search_focus {
@@ -1243,13 +1245,13 @@ impl SampleManagerApp {
             let bmin = ui.add(
                 egui::TextEdit::singleline(&mut self.bpm_min)
                     .hint_text("Min")
-                    .desired_width(38.0),
+                    .desired_width(34.0),
             );
             ui.label("-");
             let bmax = ui.add(
                 egui::TextEdit::singleline(&mut self.bpm_max)
                     .hint_text("Max")
-                    .desired_width(38.0),
+                    .desired_width(34.0),
             );
             if bmin.changed() || bmax.changed() {
                 self.run_query();
@@ -1298,20 +1300,20 @@ impl SampleManagerApp {
                 }
             }
 
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.button("[+] FOLDER").clicked() {
-                    self.show_add_modal = true;
-                    self.add_modal_error = None;
+            ui.separator();
+
+            if ui.button("[+] FOLDER").on_hover_text("Add sample library folder").clicked() {
+                self.show_add_modal = true;
+                self.add_modal_error = None;
+            }
+            if ui.button("IMPORT ADSR").on_hover_text("Import existing ADSR Sample Manager database").clicked() {
+                self.show_adsr_modal = true;
+            }
+            if let Some(rid) = self.selected_root {
+                if ui.button("RESCAN").on_hover_text("Rescan current library").clicked() {
+                    self.start_library_scan(rid);
                 }
-                if ui.button("IMPORT ADSR").clicked() {
-                    self.show_adsr_modal = true;
-                }
-                if let Some(rid) = self.selected_root {
-                    if ui.button("RESCAN").clicked() {
-                        self.start_library_scan(rid);
-                    }
-                }
-            });
+            }
         });
         ui.add_space(4.0);
     }
@@ -1578,10 +1580,30 @@ impl SampleManagerApp {
             .id_salt("sidebar_libraries_scroll")
             .max_height(140.0)
             .show(ui, |ui| {
-                let all_libs = ui.selectable_label(self.selected_root.is_none() && self.view_mode == ViewMode::Library, "All Libraries");
+                let is_all_libs = self.selected_root.is_none() && self.view_mode == ViewMode::Library && !self.filter_favorite;
+                let all_libs = ui.selectable_label(is_all_libs, "All Libraries");
                 if all_libs.clicked() {
                     clear_root = true;
+                    self.filter_favorite = false;
                     self.view_mode = ViewMode::Library;
+                    self.run_query();
+                }
+
+                let fav_count: i64 = self.db.conn.query_row(
+                    "SELECT COUNT(*) FROM favorites f JOIN files fl ON fl.id = f.file_id WHERE fl.missing_since IS NULL",
+                    [],
+                    |r| r.get(0),
+                ).unwrap_or(0);
+                let favs_active = self.filter_favorite && self.selected_root.is_none() && self.view_mode == ViewMode::Library;
+                let favs_label = format!(":: [*] Favorites ({})", fav_count);
+                if ui.selectable_label(favs_active, favs_label)
+                    .on_hover_text("View all favorited samples across all libraries")
+                    .clicked()
+                {
+                    clear_root = true;
+                    self.filter_favorite = true;
+                    self.view_mode = ViewMode::Library;
+                    self.run_query();
                 }
 
                 let recents_label = format!(":: 🕒 Recents ({})", self.session_recents.len());
@@ -1601,6 +1623,7 @@ impl SampleManagerApp {
                     let label_text = format!(":: {} ({})", folder_name, count);
                     let resp = ui.selectable_label(is_sel, label_text).on_hover_text(path);
                     if resp.clicked() {
+                        self.filter_favorite = false;
                         root_to_select = Some(*rid);
                     }
 
@@ -1745,7 +1768,7 @@ impl SampleManagerApp {
 
     fn render_central_table(&mut self, ui: &mut egui::Ui) {
         // Table Action & Drag Export Header
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             match self.view_mode {
                 ViewMode::Randomize => {
                     ui.label(
@@ -2518,12 +2541,9 @@ impl eframe::App for SampleManagerApp {
             });
 
         // Center Virtualized Sample Grid Table
-        let central_resp = egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             self.render_central_table(ui);
         });
-        if central_resp.response.interact(Sense::click()).clicked() {
-            self.focus_area = FocusArea::SampleList;
-        }
 
         self.render_modals(&ctx);
     }
@@ -2586,7 +2606,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_title("LocSamp — Sample Library Manager")
             .with_inner_size([1180.0, 750.0])
-            .with_min_inner_size([820.0, 520.0]),
+            .with_min_inner_size([720.0, 480.0]),
         ..Default::default()
     };
 
@@ -2871,10 +2891,30 @@ mod tests {
         assert_eq!(app.view_mode, ViewMode::Recents);
         assert_eq!(app.file_rows.len(), 2);
 
+        // Selecting a previous sample from within Recents must NOT re-append or reorder
+        app.select_sample(0);
+        assert_eq!(app.view_mode, ViewMode::Recents);
+        assert_eq!(app.session_recents.len(), 2);
+        assert_eq!(app.file_rows.len(), 2);
+
         // Restoring full list
         app.run_query();
         assert_eq!(app.view_mode, ViewMode::Library);
         assert_eq!(app.file_rows.len(), 500);
+
+        // Test Favorites library filter
+        app.toggle_favorite(1);
+        let fav_count: i64 = app.db.conn.query_row(
+            "SELECT COUNT(*) FROM favorites f JOIN files fl ON fl.id = f.file_id WHERE fl.missing_since IS NULL",
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(fav_count, 1);
+
+        app.filter_favorite = true;
+        app.run_query();
+        assert_eq!(app.file_rows.len(), 1);
+        assert_eq!(app.file_rows[0].id, 1);
 
         let _ = std::fs::remove_file(&db_path);
     }
