@@ -39,10 +39,24 @@ This script:
 
 LocSamp includes a reproducible Nix development and build environment:
 - [`flake.nix`](file:///Users/amon/Projects/AI/Sandboxes/cloud/work/sample-manager/flake.nix) provides native derivations for `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, and `aarch64-darwin`.
-- Automatically supplies ALSA development libraries, libudev, pkg-config, and Wayland/X11 dependencies on Linux.
+- Automatically supplies ALSA development libraries, GTK 3, GLib, libudev, pkg-config, and Wayland/X11 dependencies on Linux.
 - Simply run:
   ```bash
   nix develop
   # or
   nix-shell
   ```
+
+---
+
+## 3. Linux System Dependencies
+
+On Linux (Debian/Ubuntu), compiling the GUI binary requires GTK 3 headers for native sample drag-and-drop into DAWs, as well as ALSA headers for audio playback:
+
+```bash
+sudo apt-get install -y libasound2-dev libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config
+```
+
+- **Audio Playback (`cpal`)**: `libasound2-dev`
+- **Native DAW Drag-and-Drop (`drag`)**: `libgtk-3-dev` (supplies `glib-2.0`, `gtk+-3.0`, `cairo`, `pango`)
+- **Windowing / Graphics (`eframe` / `winit`)**: `libxcb-*-dev`, `pkg-config`

@@ -4,6 +4,8 @@ let
   linuxDeps = with pkgs; [
     pkg-config
     alsa-lib
+    gtk3
+    glib
     libxkbcommon
     wayland
     xorg.libX11

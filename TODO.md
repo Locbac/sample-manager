@@ -1,6 +1,42 @@
 # SCOUT — Project Roadmap & TODO
 
-This document tracks upcoming architecture milestones and feature roadmaps for SCOUT (Sample & Sound Library Manager).
+This document tracks upcoming architecture milestones, bug fixes, and feature roadmaps for SCOUT / LocSamp.
+
+---
+
+## 0. CI/CD & Automated GitHub Releases (Active Blocker)
+
+- [ ] **Fix Linux Runner GTK/GLib System Dependencies (`glib-sys` build failure)**:
+  - **Issue**: GitHub Actions release workflow (`release.yml`) fails during compilation on both `build-linux-x86_64` (Ubuntu latest) and `build-linux-arm64` (Ubuntu 24.04 ARM) runners:
+    ```text
+       Compiling crossbeam-utils v0.8.23
+       Compiling lazy_static v1.5.1
+       Compiling cfg_aliases v0.2.2
+    warning: glib-sys@0.18.1: 
+    error: failed to run custom build command for `glib-sys v0.18.1`
+
+    Caused by:
+      process didn't exit successfully: `/home/runner/work/sample-manager/sample-manager/target/release/build/glib-sys-.../build-script-build` (exit status: 1)
+      pkg-config output:
+        Package glib-2.0 was not found in the pkg-config search path.
+        Perhaps you should add the directory containing `glib-2.0.pc'
+        to the PKG_CONFIG_PATH environment variable
+        Package 'glib-2.0' not found
+      The system library `glib-2.0` required by crate `glib-sys` was not found.
+    ```
+  - **Root Cause**:
+    - The GUI crate `locsamp` uses `drag = "2.1.1"` for native drag-and-drop into DAWs.
+    - On Linux targets, `drag` transitively pulls in `gtk v0.18.2` and `gdk v0.18.2`, which depend on `glib-sys v0.18.1` and `gtk-sys v0.18.2`.
+    - The runner configuration previously only installed `libasound2-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev pkg-config`, omitting `libgtk-3-dev` (which supplies `glib-2.0.pc`, `gtk+-3.0.pc`, and header libraries).
+  - **Why macOS & Windows Binaries Were Not on GitHub Releases**:
+    - The `publish` job defines `needs: [build-macos, build-windows, build-linux-x86_64, build-linux-arm64]`.
+    - By default in GitHub Actions, if any upstream dependency in `needs` fails, the dependent `publish` job is immediately **skipped / cancelled**.
+    - Even though `build-macos` (Universal ARM64+x86_64) and `build-windows` (x86_64) completed successfully and uploaded their artifact zips to the run, the `publish` release step was never reached.
+    - *Note*: This is not caused by marking the release as a pre-release, but solely because the failing Linux jobs aborted the downstream publishing job before `softprops/action-gh-release@v2` could run.
+  - **Required Fixes**:
+    - Update `.github/workflows/release.yml`: Add `libgtk-3-dev` to `sudo apt-get install -y` for both `build-linux-x86_64` and `build-linux-arm64`.
+    - Update `flake.nix` & `shell.nix`: Ensure `gtk3` and `glib` are included in `linuxDeps`.
+    - Update `docs/pages/Cross-Platform Packaging.md` with the Linux GTK-3 system dependency requirements.
 
 ---
 
