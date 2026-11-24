@@ -317,7 +317,21 @@ impl SampleManagerApp {
                         _ => a.cmp(b),
                     }
                 });
-                let joined = labels.join(" / ");
+                let joined = if minor == 0 {
+                    labels
+                        .iter()
+                        .map(|l| {
+                            if l.to_ascii_lowercase().ends_with("maj") {
+                                l.clone()
+                            } else {
+                                format!("{l}maj")
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                } else {
+                    labels.join(" / ")
+                };
                 let label = format!("{joined} ({camelot})");
                 KeyComboItem {
                     id,
@@ -441,8 +455,10 @@ impl SampleManagerApp {
             _ => {
                 let k_trimmed = k_str.trim();
                 self.musical_keys.iter().find_map(|k| {
-                    if k.labels.iter().any(|l| l.eq_ignore_ascii_case(k_trimmed))
-                        || k.camelot.eq_ignore_ascii_case(k_trimmed)
+                    if k.labels.iter().any(|l| {
+                        l.eq_ignore_ascii_case(k_trimmed)
+                            || (k.minor == 0 && format!("{l}maj").eq_ignore_ascii_case(k_trimmed))
+                    }) || k.camelot.eq_ignore_ascii_case(k_trimmed)
                     {
                         Some((k.pc, k.minor))
                     } else {
@@ -2021,26 +2037,6 @@ impl SampleManagerApp {
         });
         ui.add_space(2.0);
 
-        let mut table = TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .cell_layout(Layout::left_to_right(Align::Center))
-            .column(Column::exact(28.0)) // Audition Play/Pause
-            .column(Column::exact(28.0)) // Favorite Star
-            .column(Column::exact(36.0)) // Drag Handle
-            .column(Column::initial(220.0).at_least(130.0)) // Name
-            .column(Column::initial(160.0).at_least(90.0))  // Tags
-            .column(Column::initial(80.0).at_least(55.0))   // Key
-            .column(Column::initial(55.0).at_least(40.0))   // BPM
-            .column(Column::initial(60.0).at_least(45.0))   // Duration
-            .column(Column::initial(50.0).at_least(40.0))   // Type
-            .column(Column::initial(65.0).at_least(45.0))   // Size
-            .column(Column::remainder());                    // Relative Path
-
-        if let Some(target_row) = self.scroll_to_row.take() {
-            table = table.scroll_to_row(target_row, Some(Align::Center));
-        }
-
         let mut sample_to_select = None;
         let mut toggle_fav_id = None;
         let mut sort_changed = false;
@@ -2052,8 +2048,35 @@ impl SampleManagerApp {
         let mut trigger_toggle_play = false;
         let mut needs_load_more = false;
 
-        table
-            .header(24.0, |mut header| {
+        let table_min_width = 800.0f32.max(ui.available_width());
+        egui::ScrollArea::horizontal()
+            .id_salt("sample_table_horizontal_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_min_width(table_min_width);
+
+                let mut table = TableBuilder::new(ui)
+                    .striped(true)
+                    .resizable(true)
+                    .cell_layout(Layout::left_to_right(Align::Center))
+                    .column(Column::exact(28.0)) // Audition Play/Pause
+                    .column(Column::exact(28.0)) // Favorite Star
+                    .column(Column::exact(36.0)) // Drag Handle
+                    .column(Column::initial(220.0).at_least(130.0)) // Name
+                    .column(Column::initial(160.0).at_least(90.0))  // Tags
+                    .column(Column::initial(80.0).at_least(55.0))   // Key
+                    .column(Column::initial(55.0).at_least(40.0))   // BPM
+                    .column(Column::initial(60.0).at_least(45.0))   // Duration
+                    .column(Column::initial(50.0).at_least(40.0))   // Type
+                    .column(Column::initial(65.0).at_least(45.0))   // Size
+                    .column(Column::remainder());                    // Relative Path
+
+                if let Some(target_row) = self.scroll_to_row.take() {
+                    table = table.scroll_to_row(target_row, Some(Align::Center));
+                }
+
+                table
+                    .header(24.0, |mut header| {
                 header.col(|ui| {
                     ui.strong(">");
                 });
@@ -2271,6 +2294,7 @@ impl SampleManagerApp {
                         );
                     });
                 });
+            });
             });
 
         if needs_load_more {
@@ -3102,15 +3126,21 @@ mod tests {
         ];
         assert_eq!(camelots, expected_camelots);
 
-        // 2. Verify merged enharmonic labels
+        // 2. Verify merged enharmonic labels (major keys formatted with 'maj', minor with 'm')
         let item_2a = app.musical_keys.iter().find(|k| k.camelot == "2A").unwrap();
         assert_eq!(item_2a.label, "D#m / Ebm (2A)");
 
         let item_3b = app.musical_keys.iter().find(|k| k.camelot == "3B").unwrap();
-        assert_eq!(item_3b.label, "C# / Db (3B)");
+        assert_eq!(item_3b.label, "C#maj / Dbmaj (3B)");
 
         let item_2b = app.musical_keys.iter().find(|k| k.camelot == "2B").unwrap();
-        assert_eq!(item_2b.label, "F# / Gb (2B)");
+        assert_eq!(item_2b.label, "F#maj / Gbmaj (2B)");
+
+        let item_8b = app.musical_keys.iter().find(|k| k.camelot == "8B").unwrap();
+        assert_eq!(item_8b.label, "Cmaj (8B)");
+
+        let item_12b = app.musical_keys.iter().find(|k| k.camelot == "12B").unwrap();
+        assert_eq!(item_12b.label, "Emaj (12B)");
 
         // 3. Verify format_key_column transposition hints with target key = Am (8A)
         let item_am = app.musical_keys.iter().find(|k| k.camelot == "8A").unwrap();
@@ -3245,5 +3275,39 @@ mod tests {
         assert_eq!(app.format_key_column(&row_d_unkeyed), "D (-2st)");
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_table_horizontal_scroll() {
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            ui.set_max_width(500.0);
+            ui.set_max_height(400.0);
+            let table_min_width = 800.0f32.max(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt("table_hscroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.set_min_width(table_min_width);
+                    let table = TableBuilder::new(ui)
+                        .striped(true)
+                        .resizable(true)
+                        .column(Column::exact(100.0))
+                        .column(Column::exact(200.0))
+                        .column(Column::remainder());
+                    table.header(20.0, |mut h| {
+                        h.col(|ui| { ui.label("Col1"); });
+                        h.col(|ui| { ui.label("Col2"); });
+                        h.col(|ui| { ui.label("Col3"); });
+                    }).body(|body| {
+                        body.rows(20.0, 50, |mut r| {
+                            r.col(|ui| { ui.label("A"); });
+                            r.col(|ui| { ui.label("B"); });
+                            r.col(|ui| { ui.label("C"); });
+                        });
+                    });
+                });
+        });
+        output.textures_delta.clear();
     }
 }
