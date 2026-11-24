@@ -2,7 +2,7 @@
 //! Never loads the library: every query is LIMIT/OFFSET with a total
 //! computed by a window count on the first page only.
 
-use rusqlite::{types::Value, Connection};
+use rusqlite::{types::Value, Connection, OptionalExtension};
 
 #[derive(Debug, Default, Clone)]
 pub struct SearchQuery {
@@ -15,6 +15,8 @@ pub struct SearchQuery {
     pub bpm_min: Option<f64>,
     pub bpm_max: Option<f64>,
     pub key_id: Option<i64>,
+    pub key_relative: bool,
+    pub key_transposed: bool,
     pub is_loop: Option<bool>,
     pub favorites_only: bool,
     pub tags_include: Vec<i64>, // AND semantics (EXISTS per tag)
@@ -51,6 +53,8 @@ pub struct FileRow {
     pub bpm: Option<f64>,
     pub key: Option<String>,
     pub camelot: Option<String>,
+    pub key_pc: Option<i32>,
+    pub key_minor: Option<i32>,
     pub is_loop: Option<bool>,
     pub size: i64,
     pub favorite: bool,
@@ -126,9 +130,35 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
         where_sql.push("f.bpm <= ?".into());
         params.push(v.into());
     }
-    if let Some(v) = q.key_id {
-        where_sql.push("f.key_id = ?".into());
-        params.push(v.into());
+    let target_key = if let Some(kid) = q.key_id {
+        c.query_row(
+            "SELECT pc, minor, camelot FROM musical_keys WHERE id = ?",
+            [kid],
+            |r| Ok((r.get::<_, i32>(0)?, r.get::<_, i32>(1)?, r.get::<_, String>(2)?)),
+        )
+        .optional()?
+    } else {
+        None
+    };
+
+    if let Some((target_pc, target_minor, _)) = target_key {
+        if q.key_transposed {
+            where_sql.push("f.key_id IS NOT NULL".into());
+        } else if q.key_relative {
+            let rel_pc = if target_minor == 1 { (target_pc + 3) % 12 } else { (target_pc + 9) % 12 };
+            let rel_minor = 1 - target_minor;
+            where_sql.push("((mk.pc = ? AND mk.minor = ?) OR (mk.pc = ? AND mk.minor = ?))".into());
+            params.push(target_pc.into());
+            params.push(target_minor.into());
+            params.push(rel_pc.into());
+            params.push(rel_minor.into());
+        } else {
+            where_sql.push("(mk.pc = ? AND mk.minor = ?)".into());
+            params.push(target_pc.into());
+            params.push(target_minor.into());
+        }
+    } else if q.key_id.is_some() {
+        where_sql.push("1 = 0".into());
     }
     if let Some(v) = q.is_loop {
         where_sql.push("f.is_loop = ?".into());
@@ -156,6 +186,18 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
         params.push((*t).into());
     }
 
+    let mut order_sql = order.to_string();
+    if q.key_transposed {
+        if let Some((target_pc, target_minor, _)) = target_key {
+            let rel_pc = if target_minor == 1 { (target_pc + 3) % 12 } else { (target_pc + 9) % 12 };
+            let target_tonic_expr = format!("(CASE WHEN mk.minor = {} THEN {} ELSE {} END)", target_minor, target_pc, rel_pc);
+            let diff_expr = format!("(({target_tonic_expr} - mk.pc + 12) % 12)");
+            let dist_expr = format!("min({diff_expr}, 12 - {diff_expr})");
+            let modality_diff_expr = format!("(CASE WHEN mk.minor = {} THEN 0 ELSE 1 END)", target_minor);
+            order_sql = format!("{dist_expr} ASC, {modality_diff_expr} ASC, {order}");
+        }
+    }
+
     let sql = format!(
         "SELECT f.id, f.rel_path, f.name, f.ext, f.duration_ms, f.bpm, f.size,
                 EXISTS(SELECT 1 FROM favorites fv WHERE fv.file_id = f.id) AS fav,
@@ -168,15 +210,18 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
                 ) AS tag_list,
                 mk.label AS key_label,
                 mk.camelot AS camelot_label,
-                f.is_loop
+                f.is_loop,
+                mk.pc,
+                mk.minor
          FROM files f
          LEFT JOIN musical_keys mk ON mk.id = f.key_id
          {fts}
          WHERE {w}
-         ORDER BY {order}
+         ORDER BY {order_sql}
          LIMIT ? OFFSET ?",
         fts = if join_fts { "JOIN files_fts ON files_fts.rowid = f.id" } else { "" },
         w = where_sql.join(" AND "),
+        order_sql = order_sql,
     );
     params.push((q.limit as i64).into());
     params.push((q.offset as i64).into());
@@ -202,6 +247,8 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
             let camelot: Option<String> = r.get(11)?;
             let is_loop_raw: Option<i64> = r.get(12)?;
             let is_loop = is_loop_raw.map(|v| v != 0);
+            let key_pc: Option<i32> = r.get(13)?;
+            let key_minor: Option<i32> = r.get(14)?;
 
             Ok(FileRow {
                 id: r.get(0)?,
@@ -212,6 +259,8 @@ pub fn search(c: &Connection, q: &SearchQuery) -> rusqlite::Result<Vec<FileRow>>
                 bpm: r.get(5)?,
                 key,
                 camelot,
+                key_pc,
+                key_minor,
                 is_loop,
                 size: r.get(6)?,
                 favorite: r.get::<_, i64>(7)? == 1,
@@ -255,7 +304,7 @@ mod tests {
                  CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
                  CREATE TABLE file_tags (file_id INTEGER, tag_id INTEGER, state TEXT);
                  CREATE TABLE favorites (file_id INTEGER PRIMARY KEY);
-                 CREATE TABLE musical_keys (id INTEGER PRIMARY KEY, label TEXT, camelot TEXT);
+                 CREATE TABLE musical_keys (id INTEGER PRIMARY KEY, label TEXT, camelot TEXT, pc INTEGER, minor INTEGER);
                  INSERT INTO files (id, root_id, rel_path, name, ext, size, mtime) VALUES
                    (1, 1, 'Perc 11.wav', 'Perc 11.wav', 'wav', 100, 1),
                    (2, 1, 'Perc 1.wav', 'Perc 1.wav', 'wav', 100, 1),
@@ -276,5 +325,102 @@ mod tests {
             names,
             vec!["Perc 1.wav", "Perc 2.wav", "Perc 10.wav", "Perc 11.wav", "Perc 20.wav"]
         );
+    }
+
+    #[test]
+    fn test_search_key_enharmonics_and_relative_and_transposed() {
+        let db = scout_db::Db {
+            conn: rusqlite::Connection::open_in_memory().unwrap(),
+        };
+        scout_db::apply_pragmas(&db.conn).unwrap();
+        db.conn
+            .execute_batch(
+                "CREATE TABLE roots (id INTEGER PRIMARY KEY, path TEXT UNIQUE, enabled INTEGER DEFAULT 1);
+                 INSERT INTO roots (id, path) VALUES (1, '/test');
+                 CREATE TABLE files (
+                     id INTEGER PRIMARY KEY,
+                     root_id INTEGER,
+                     rel_path TEXT,
+                     name TEXT,
+                     ext TEXT,
+                     size INTEGER,
+                     mtime INTEGER,
+                     duration_ms INTEGER,
+                     bpm REAL,
+                     key_id INTEGER,
+                     is_loop INTEGER,
+                     missing_since TEXT
+                 );
+                 CREATE TABLE tags (id INTEGER PRIMARY KEY, name TEXT);
+                 CREATE TABLE file_tags (file_id INTEGER, tag_id INTEGER, state TEXT);
+                 CREATE TABLE favorites (file_id INTEGER PRIMARY KEY);
+                 CREATE TABLE musical_keys (id INTEGER PRIMARY KEY, label TEXT, camelot TEXT, pc INTEGER, minor INTEGER);
+                 INSERT INTO musical_keys (id, label, camelot, pc, minor) VALUES
+                   (1, 'Ebm', '2A', 3, 1),
+                   (2, 'D#m', '2A', 3, 1),
+                   (3, 'Am',  '8A', 9, 1),
+                   (4, 'C',   '8B', 0, 0),
+                   (5, 'Bm',  '10A', 11, 1),
+                   (6, 'A#m', '3A', 10, 1),
+                   (7, 'Gm',  '6A', 7, 1);
+                 INSERT INTO files (id, root_id, rel_path, name, ext, size, mtime, key_id) VALUES
+                   (1, 1, 'ebm_sample.wav', 'ebm_sample.wav', 'wav', 100, 1, 1),
+                   (2, 1, 'dsharp_sample.wav', 'dsharp_sample.wav', 'wav', 100, 1, 2),
+                   (3, 1, 'am_sample.wav', 'am_sample.wav', 'wav', 100, 1, 3),
+                   (4, 1, 'c_sample.wav', 'c_sample.wav', 'wav', 100, 1, 4),
+                   (5, 1, 'bm_sample.wav', 'bm_sample.wav', 'wav', 100, 1, 5),
+                   (6, 1, 'asharp_sample.wav', 'asharp_sample.wav', 'wav', 100, 1, 6),
+                   (7, 1, 'gm_sample.wav', 'gm_sample.wav', 'wav', 100, 1, 7);",
+            )
+            .unwrap();
+
+        // 1. Enharmonic match: querying Ebm (id=1) matches both Ebm and D#m
+        let q_enharmonic = SearchQuery {
+            key_id: Some(1),
+            limit: 50,
+            ..Default::default()
+        };
+        let rows = search(&db.conn, &q_enharmonic).unwrap();
+        let mut ids: Vec<i64> = rows.into_iter().map(|r| r.id).collect();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]);
+
+        // 2. Relative match: querying Am (id=3) with key_relative = true matches Am (8A) and C (8B)
+        let q_rel = SearchQuery {
+            key_id: Some(3),
+            key_relative: true,
+            limit: 50,
+            ..Default::default()
+        };
+        let rows = search(&db.conn, &q_rel).unwrap();
+        let ids: Vec<i64> = rows.into_iter().map(|r| r.id).collect();
+        assert_eq!(ids, vec![3, 4]);
+
+        // 3. Transposed match: querying Am (id=3) with key_transposed = true matches all keyed files
+        // and sorts primarily by pitch distance |semitones| ASC:
+        // Am (exact, dist 0) -> C (relative, dist 0) -> A#m (dist 1) -> Bm, Gm (dist 2) -> Ebm, D#m (dist 6)
+        let q_trans = SearchQuery {
+            key_id: Some(3),
+            key_transposed: true,
+            limit: 50,
+            ..Default::default()
+        };
+        let rows = search(&db.conn, &q_trans).unwrap();
+        let names: Vec<String> = rows.into_iter().map(|r| r.name).collect();
+        assert_eq!(names[0], "am_sample.wav"); // exact (0st)
+        assert_eq!(names[1], "c_sample.wav");  // relative (0st)
+        assert_eq!(names[2], "asharp_sample.wav"); // -1st (dist 1)
+        // Next are Bm (-2st, dist 2) and Gm (+2st, dist 2)
+        assert!(names[3] == "bm_sample.wav" || names[3] == "gm_sample.wav");
+        assert!(names[4] == "bm_sample.wav" || names[4] == "gm_sample.wav");
+
+        // 4. Invalid key_id: fails closed (returns empty result, not all rows)
+        let q_invalid = SearchQuery {
+            key_id: Some(99999),
+            limit: 50,
+            ..Default::default()
+        };
+        let rows = search(&db.conn, &q_invalid).unwrap();
+        assert_eq!(rows.len(), 0);
     }
 }

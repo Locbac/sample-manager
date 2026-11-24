@@ -58,6 +58,16 @@ pub enum ViewMode {
     Recents,
 }
 
+#[derive(Debug, Clone)]
+pub struct KeyComboItem {
+    pub id: i64,
+    pub label: String,
+    pub pc: i32,
+    pub minor: i32,
+    pub camelot: String,
+    pub labels: Vec<String>,
+}
+
 struct SampleManagerApp {
     db_path: PathBuf,
     db: Db,
@@ -78,6 +88,8 @@ struct SampleManagerApp {
     selected_root: Option<i64>,
     selected_tags: HashSet<i64>,
     selected_key: Option<i64>,
+    key_match_relative: bool,
+    key_match_transposed: bool,
     bpm_min: String,
     bpm_max: String,
     filter_loop: Option<bool>,
@@ -87,7 +99,7 @@ struct SampleManagerApp {
     // Data cache
     roots: Vec<(i64, String, i64)>, // id, path, count
     tags: Vec<(i64, String, String, i64)>, // id, name, kind, count
-    musical_keys: Vec<(i64, String)>, // id, label
+    musical_keys: Vec<KeyComboItem>,
     file_rows: Vec<FileRow>,
     total_results: i64,
     selected_row_index: Option<usize>,
@@ -196,6 +208,8 @@ impl SampleManagerApp {
             selected_root: None,
             selected_tags: HashSet::new(),
             selected_key: None,
+            key_match_relative: false,
+            key_match_transposed: false,
             bpm_min: String::new(),
             bpm_max: String::new(),
             filter_loop: None,
@@ -267,16 +281,63 @@ impl SampleManagerApp {
         }
         self.roots = roots;
 
-        // Load musical keys
-        let mut keys = Vec::new();
-        if let Ok(mut stmt) = self.db.conn.prepare("SELECT id, label FROM musical_keys ORDER BY id ASC") {
-            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) {
+        // Load musical keys grouped by (pc, minor) in Camelot order
+        let mut grouped: std::collections::BTreeMap<(i32, i32), (i64, Vec<String>, String)> = std::collections::BTreeMap::new();
+        if let Ok(mut stmt) = self.db.conn.prepare("SELECT id, label, camelot, pc, minor FROM musical_keys ORDER BY id ASC") {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i32>(3)?, r.get::<_, i32>(4)?))) {
                 for row in rows.flatten() {
-                    keys.push(row);
+                    let (id, label, raw_camelot, pc, minor) = row;
+                    let canonical_camelot = if minor == 1 {
+                        let num = match pc { 8 => 1, 3 => 2, 10 => 3, 5 => 4, 0 => 5, 7 => 6, 2 => 7, 9 => 8, 4 => 9, 11 => 10, 6 => 11, 1 => 12, _ => 0 };
+                        format!("{num}A")
+                    } else {
+                        let num = match pc { 11 => 1, 6 => 2, 1 => 3, 8 => 4, 3 => 5, 10 => 6, 5 => 7, 0 => 8, 7 => 9, 2 => 10, 9 => 11, 4 => 12, _ => 0 };
+                        format!("{num}B")
+                    };
+                    let camelot = if canonical_camelot.starts_with('0') { raw_camelot } else { canonical_camelot };
+
+                    grouped.entry((pc, minor))
+                        .and_modify(|(_, labels, _)| {
+                            if !labels.contains(&label) {
+                                labels.push(label.clone());
+                            }
+                        })
+                        .or_insert_with(|| (id, vec![label], camelot));
                 }
             }
         }
-        self.musical_keys = keys;
+
+        let mut key_items: Vec<KeyComboItem> = grouped
+            .into_iter()
+            .map(|((pc, minor), (id, mut labels, camelot))| {
+                labels.sort_by(|a, b| {
+                    match (a.contains('#'), b.contains('#')) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a.cmp(b),
+                    }
+                });
+                let joined = labels.join(" / ");
+                let label = format!("{joined} ({camelot})");
+                KeyComboItem {
+                    id,
+                    label,
+                    pc,
+                    minor,
+                    camelot,
+                    labels,
+                }
+            })
+            .collect();
+
+        // Sort by Camelot order (1A..12A, 1B..12B)
+        key_items.sort_by_key(|k| {
+            let is_major = k.camelot.ends_with('B');
+            let num: u32 = k.camelot.trim_matches(|c: char| !c.is_numeric()).parse().unwrap_or(0);
+            (is_major, num)
+        });
+
+        self.musical_keys = key_items;
 
         // Load active tags with usage counts
         let mut tags = Vec::new();
@@ -310,6 +371,8 @@ impl SampleManagerApp {
             bpm_min,
             bpm_max,
             key_id: self.selected_key,
+            key_relative: self.key_match_relative,
+            key_transposed: self.key_match_transposed,
             is_loop: self.filter_loop,
             favorites_only: self.filter_favorite,
             tags_include: self.selected_tags.iter().copied().collect(),
@@ -349,6 +412,68 @@ impl SampleManagerApp {
                 self.total_results = self.file_rows.len() as i64;
             } else {
                 self.file_rows.append(&mut next_rows);
+            }
+        }
+    }
+
+    fn format_key_column(&self, item: &FileRow) -> String {
+        let lexical_buf;
+        let k_str = if let Some(k) = item.key.as_deref() {
+            k
+        } else {
+            lexical_buf = scout_tagging::extract_key(&item.name, &item.rel_path).map(|(k, _)| k);
+            match lexical_buf.as_deref() {
+                Some(k) => k,
+                None => return "--".to_string(),
+            }
+        };
+
+        let Some(sel_id) = self.selected_key else {
+            return k_str.to_string();
+        };
+
+        let Some(target) = self.musical_keys.iter().find(|k| k.id == sel_id) else {
+            return k_str.to_string();
+        };
+
+        let sample_key_info = match (item.key_pc, item.key_minor) {
+            (Some(pc), Some(min)) => Some((pc, min)),
+            _ => {
+                let k_trimmed = k_str.trim();
+                self.musical_keys.iter().find_map(|k| {
+                    if k.labels.iter().any(|l| l.eq_ignore_ascii_case(k_trimmed))
+                        || k.camelot.eq_ignore_ascii_case(k_trimmed)
+                    {
+                        Some((k.pc, k.minor))
+                    } else {
+                        None
+                    }
+                })
+            }
+        };
+
+        let Some((spc, sminor)) = sample_key_info else {
+            return k_str.to_string();
+        };
+
+        if spc == target.pc && sminor == target.minor {
+            // Exact match
+            k_str.to_string()
+        } else {
+            let rel_pc = if target.minor == 1 { (target.pc + 3) % 12 } else { (target.pc + 9) % 12 };
+            if sminor != target.minor && spc == rel_pc {
+                // Relative match
+                format!("{k_str} (rel)")
+            } else {
+                // Transposed match
+                let target_tonic = if sminor == target.minor { target.pc } else { rel_pc };
+                let diff = (target_tonic - spc).rem_euclid(12);
+                let shift = if diff > 6 { diff - 12 } else { diff };
+                if shift > 0 {
+                    format!("{k_str} (+{shift}st)")
+                } else {
+                    format!("{k_str} ({shift}st)")
+                }
             }
         }
     }
@@ -1214,20 +1339,20 @@ impl SampleManagerApp {
             ui.label("Key:");
             let mut new_key = self.selected_key;
             let mut key_changed = false;
-            let keys_clone = self.musical_keys.clone();
+            let selected_label = self
+                .selected_key
+                .and_then(|kid| self.musical_keys.iter().find(|k| k.id == kid))
+                .map(|k| k.label.as_str())
+                .unwrap_or("All Keys");
+
             egui::ComboBox::from_id_salt("key_filter_combo")
-                .selected_text(
-                    self.selected_key
-                        .and_then(|kid| keys_clone.iter().find(|(id, _)| *id == kid))
-                        .map(|(_, l)| l.as_str())
-                        .unwrap_or("All Keys"),
-                )
+                .selected_text(selected_label)
                 .show_ui(ui, |ui| {
                     if ui.selectable_value(&mut new_key, None, "All Keys").clicked() {
                         key_changed = true;
                     }
-                    for (kid, label) in &keys_clone {
-                        if ui.selectable_value(&mut new_key, Some(*kid), label).clicked() {
+                    for k in &self.musical_keys {
+                        if ui.selectable_value(&mut new_key, Some(k.id), &k.label).clicked() {
                             key_changed = true;
                         }
                     }
@@ -1235,8 +1360,34 @@ impl SampleManagerApp {
 
             if key_changed {
                 self.selected_key = new_key;
+                if self.selected_key.is_none() {
+                    self.key_match_relative = false;
+                    self.key_match_transposed = false;
+                }
                 self.run_query();
             }
+
+            // Compact [Rel] and [Trans] toggles (disabled if no key selected; mutually exclusive)
+            let has_key = self.selected_key.is_some();
+            ui.add_enabled_ui(has_key, |ui| {
+                let rel_btn = ui.selectable_label(self.key_match_relative, "Rel");
+                if rel_btn.clicked() {
+                    self.key_match_relative = !self.key_match_relative;
+                    if self.key_match_relative {
+                        self.key_match_transposed = false;
+                    }
+                    self.run_query();
+                }
+
+                let trans_btn = ui.selectable_label(self.key_match_transposed, "Trans");
+                if trans_btn.clicked() {
+                    self.key_match_transposed = !self.key_match_transposed;
+                    if self.key_match_transposed {
+                        self.key_match_relative = false;
+                    }
+                    self.run_query();
+                }
+            });
 
             // BPM Filter
             ui.label("BPM:");
@@ -1879,7 +2030,7 @@ impl SampleManagerApp {
             .column(Column::exact(36.0)) // Drag Handle
             .column(Column::initial(220.0).at_least(130.0)) // Name
             .column(Column::initial(160.0).at_least(90.0))  // Tags
-            .column(Column::initial(55.0).at_least(40.0))   // Key
+            .column(Column::initial(80.0).at_least(55.0))   // Key
             .column(Column::initial(55.0).at_least(40.0))   // BPM
             .column(Column::initial(60.0).at_least(45.0))   // Duration
             .column(Column::initial(50.0).at_least(40.0))   // Type
@@ -2074,10 +2225,7 @@ impl SampleManagerApp {
 
                     // Musical Key column
                     row.col(|ui| {
-                        let key_val = item.key.clone().or_else(|| {
-                            scout_tagging::extract_key(&item.name, &item.rel_path).map(|(k, _)| k)
-                        });
-                        let key_str = key_val.unwrap_or_else(|| "--".to_string());
+                        let key_str = self.format_key_column(item);
                         ui.label(egui::RichText::new(key_str).strong().color(Color32::WHITE));
                     });
 
@@ -2696,6 +2844,8 @@ mod tests {
             bpm: Some(128.0),
             key: None,
             camelot: None,
+            key_pc: None,
+            key_minor: None,
             is_loop: Some(true),
             size: 1000,
             favorite: false,
@@ -2720,6 +2870,8 @@ mod tests {
             bpm: None,
             key: None,
             camelot: None,
+            key_pc: None,
+            key_minor: None,
             is_loop: Some(false),
             size: 1000,
             favorite: false,
@@ -2929,6 +3081,168 @@ mod tests {
         assert_eq!(app.session_recents[0].id, 1);
         assert_eq!(app.session_recents[1].id, 2);
         assert_eq!(app.session_recents[2].id, 3);
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_gui_key_grouping_and_transposition_formatting() {
+        let db_path = std::env::temp_dir().join(format!("test_gui_keys_{}.db", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let mut app = SampleManagerApp::new(db_path.clone(), None);
+
+        // load_metadata parses musical_keys from DB and groups enharmonics
+        app.load_metadata();
+
+        // 1. Verify Camelot order: 1A..12A then 1B..12B
+        assert_eq!(app.musical_keys.len(), 24);
+        let camelots: Vec<String> = app.musical_keys.iter().map(|k| k.camelot.clone()).collect();
+        let expected_camelots = vec![
+            "1A", "2A", "3A", "4A", "5A", "6A", "7A", "8A", "9A", "10A", "11A", "12A",
+            "1B", "2B", "3B", "4B", "5B", "6B", "7B", "8B", "9B", "10B", "11B", "12B",
+        ];
+        assert_eq!(camelots, expected_camelots);
+
+        // 2. Verify merged enharmonic labels
+        let item_2a = app.musical_keys.iter().find(|k| k.camelot == "2A").unwrap();
+        assert_eq!(item_2a.label, "D#m / Ebm (2A)");
+
+        let item_3b = app.musical_keys.iter().find(|k| k.camelot == "3B").unwrap();
+        assert_eq!(item_3b.label, "C# / Db (3B)");
+
+        let item_2b = app.musical_keys.iter().find(|k| k.camelot == "2B").unwrap();
+        assert_eq!(item_2b.label, "F# / Gb (2B)");
+
+        // 3. Verify format_key_column transposition hints with target key = Am (8A)
+        let item_am = app.musical_keys.iter().find(|k| k.camelot == "8A").unwrap();
+        app.selected_key = Some(item_am.id);
+
+        let row_exact = scout_search::FileRow {
+            id: 1,
+            rel_path: "am.wav".into(),
+            name: "am.wav".into(),
+            ext: "wav".into(),
+            duration_ms: None,
+            bpm: None,
+            key: Some("Am".into()),
+            camelot: Some("8A".into()),
+            key_pc: Some(9),
+            key_minor: Some(1),
+            is_loop: None,
+            size: 100,
+            favorite: false,
+            total: 1,
+            tags: vec![],
+            tags_display: String::new(),
+        };
+        assert_eq!(app.format_key_column(&row_exact), "Am");
+
+        let row_rel = scout_search::FileRow {
+            id: 2,
+            rel_path: "c.wav".into(),
+            name: "c.wav".into(),
+            ext: "wav".into(),
+            duration_ms: None,
+            bpm: None,
+            key: Some("C".into()),
+            camelot: Some("8B".into()),
+            key_pc: Some(0),
+            key_minor: Some(0),
+            is_loop: None,
+            size: 100,
+            favorite: false,
+            total: 1,
+            tags: vec![],
+            tags_display: String::new(),
+        };
+        assert_eq!(app.format_key_column(&row_rel), "C (rel)");
+
+        let row_bm = scout_search::FileRow {
+            id: 3,
+            rel_path: "bm.wav".into(),
+            name: "bm.wav".into(),
+            ext: "wav".into(),
+            duration_ms: None,
+            bpm: None,
+            key: Some("Bm".into()),
+            camelot: Some("10A".into()),
+            key_pc: Some(11),
+            key_minor: Some(1),
+            is_loop: None,
+            size: 100,
+            favorite: false,
+            total: 1,
+            tags: vec![],
+            tags_display: String::new(),
+        };
+        assert_eq!(app.format_key_column(&row_bm), "Bm (-2st)");
+
+        let row_asharpm = scout_search::FileRow {
+            id: 4,
+            rel_path: "asharpm.wav".into(),
+            name: "asharpm.wav".into(),
+            ext: "wav".into(),
+            duration_ms: None,
+            bpm: None,
+            key: Some("A#m".into()),
+            camelot: Some("3A".into()),
+            key_pc: Some(10),
+            key_minor: Some(1),
+            is_loop: None,
+            size: 100,
+            favorite: false,
+            total: 1,
+            tags: vec![],
+            tags_display: String::new(),
+        };
+        assert_eq!(app.format_key_column(&row_asharpm), "A#m (-1st)");
+
+        let row_gm = scout_search::FileRow {
+            id: 5,
+            rel_path: "gm.wav".into(),
+            name: "gm.wav".into(),
+            ext: "wav".into(),
+            duration_ms: None,
+            bpm: None,
+            key: Some("Gm".into()),
+            camelot: Some("6A".into()),
+            key_pc: Some(7),
+            key_minor: Some(1),
+            is_loop: None,
+            size: 100,
+            favorite: false,
+            total: 1,
+            tags: vec![],
+            tags_display: String::new(),
+        };
+        assert_eq!(app.format_key_column(&row_gm), "Gm (+2st)");
+
+        // 4. Verify with target key = C (8B)
+        let item_c = app.musical_keys.iter().find(|k| k.camelot == "8B").unwrap();
+        app.selected_key = Some(item_c.id);
+        assert_eq!(app.format_key_column(&row_rel), "C");
+        assert_eq!(app.format_key_column(&row_exact), "Am (rel)");
+
+        // 5. Verify exact token matching fallback (no substring false positives like "D" matching "D#m")
+        let row_d_unkeyed = scout_search::FileRow {
+            id: 6,
+            rel_path: "synth_D.wav".into(),
+            name: "synth_D.wav".into(),
+            ext: "wav".into(),
+            duration_ms: None,
+            bpm: None,
+            key: None, // relies on scout_tagging extraction of "D"
+            camelot: None,
+            key_pc: None,
+            key_minor: None,
+            is_loop: None,
+            size: 100,
+            favorite: false,
+            total: 1,
+            tags: vec![],
+            tags_display: String::new(),
+        };
+        // D major (pc=2, minor=0) with target C (pc=0, minor=0) is -2st shift
+        assert_eq!(app.format_key_column(&row_d_unkeyed), "D (-2st)");
 
         let _ = std::fs::remove_file(&db_path);
     }
